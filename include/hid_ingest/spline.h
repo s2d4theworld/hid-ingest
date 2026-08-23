@@ -19,7 +19,10 @@ inline float dist_sq(Vec2 a, Vec2 b) {
     return dx * dx + dy * dy;
 }
 
-/// Centripetal parameterization (alpha = 0.5) over points[0..n-1].
+/// Chordal parameterization (alpha = 1) over points[0..n-1]: t advances by
+/// the Euclidean distance between consecutive points. NOTE: this is NOT
+/// centripetal (alpha = 0.5 would be pow(dist, 0.5)); the name is historical.
+/// The tangent math downstream is self-consistent with any monotonic dt.
 /// t must have space for n entries. Returns total curve length parameter.
 inline float centripetal_times(const Vec2* pts, size_t n, float* t) {
     t[0] = 0.0f;
@@ -39,7 +42,8 @@ inline Vec2 hermite(Vec2 p0, Vec2 p1, Vec2 m0, Vec2 m1, float s) {
 }
 
 /// Evaluate the centripetal Catmull-Rom segment between p1 and p2 given the
-/// 4-point window [p0..p3] and their centripetal times t[0..3], at u in (0,1).
+/// 4-point window [p0..p3] and their parameterization times t[0..3], at
+/// u in (0,1). (Parameterization is chordal — see centripetal_times note.)
 inline Vec2 catmull_rom_segment(const Vec2* p, const float* t, float u) {
     // Finite-difference tangents scaled by chord times (centripetal CR form).
     const float dt0 = t[1] - t[0], dt1 = t[2] - t[1], dt2 = t[3] - t[2];
@@ -97,7 +101,6 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
             pts[j] = { FromFixed24_8(samples[i + j].dx), FromFixed24_8(samples[i + j].dy) };
         }
         centripetal_times(pts, n, ts);
-
         // NOTE: re-parameterizing per window means tangents near chunk seams
         // use slightly different chord times than a whole-batch fit would —
         // sub-pixel discontinuities at seams are possible. Acceptable for the
@@ -117,13 +120,13 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
                 emit(catmull_rom_segment(p, tt, static_cast<float>(s) / steps));
             }
         }
-        i += n - 3;  // overlap by 3 to keep continuity windows
+        i += n;  // window fully splined through its last point (pts[n-1]);
+                 // segments [seg, seg+2] covered up to pts[n-1] inclusive
     }
 
-    // Remainder: fewer than 4 unprocessed points remain between the last
-    // spline window and the final point. Emit them as straight segments so
-    // interior samples are not dropped geometrically (the Catmull-Rom loop
-    // above needs a 4-point window).
+    // Remainder: fewer than 4 unprocessed points remain after the last
+    // spline window. Emit them as straight segments so interior samples are
+    // not dropped geometrically (the Catmull-Rom loop needs a 4-point window).
     if (i + 1 < count && written < out_cap) {
         Vec2 prev_pt = { FromFixed24_8(samples[i].dx), FromFixed24_8(samples[i].dy) };
         for (size_t j = i + 1; j + 1 < count && written < out_cap; ++j) {

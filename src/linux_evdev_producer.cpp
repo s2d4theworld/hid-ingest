@@ -61,7 +61,7 @@ public:
 private:
     void run();
     bool discover_devices();
-    void handle_sync_loss(struct libevdev* dev);
+    void handle_sync_loss(CapturedDevice* captured);
 
     struct CapturedDevice {
         int fd;
@@ -154,12 +154,43 @@ bool EvdevProducer::discover_devices() {
     return !devices_.empty();
 }
 
-void EvdevProducer::handle_sync_loss(struct libevdev* dev) {
+/// Resync after an event gap: replay the SYNC events through the same
+/// state machine as the normal path so per-device mirrors (buttons,
+/// last position) stay consistent. libevdev updates its own internal axis
+/// state during SYNC reads; our mirror must too, or a press that happened
+/// inside the gap would be missing from the sample stream until the next
+/// physical transition.
+void EvdevProducer::handle_sync_loss(CapturedDevice* captured) {
     input_event ev;
     int rc;
     do {
-        rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_SYNC, &ev);
-    } while (rc == LIBEVDEV_READ_STATUS_SYNC || rc == LIBEVDEV_READ_STATUS_SUCCESS);
+        rc = libevdev_next_event(captured->dev, LIBEVDEV_READ_FLAG_SYNC, &ev);
+        if (rc != LIBEVDEV_READ_STATUS_SYNC && rc != LIBEVDEV_READ_STATUS_SUCCESS)
+            break;
+        switch (ev.type) {
+            case EV_ABS:
+                // Mirror-only update (no sample push during resync).
+                if (ev.code == ABS_X)
+                    captured->last_x = static_cast<int32_t>(
+                        static_cast<int64_t>(ev.value) << 8);
+                if (ev.code == ABS_Y)
+                    captured->last_y = static_cast<int32_t>(
+                        static_cast<int64_t>(ev.value) << 8);
+                break;
+            case EV_KEY:
+                if (ev.code == BTN_LEFT)
+                    captured->buttons = ev.value ? (captured->buttons | 0x01)
+                                                 : (captured->buttons & static_cast<uint16_t>(~0x01));
+                if (ev.code == BTN_RIGHT)
+                    captured->buttons = ev.value ? (captured->buttons | 0x02)
+                                                 : (captured->buttons & static_cast<uint16_t>(~0x02));
+                if (ev.code == BTN_MIDDLE)
+                    captured->buttons = ev.value ? (captured->buttons | 0x04)
+                                                 : (captured->buttons & static_cast<uint16_t>(~0x04));
+                break;
+            default: break;
+        }
+    } while (true);
 }
 
 void EvdevProducer::run() {
@@ -312,7 +343,7 @@ void EvdevProducer::run() {
                     default: break;
                 }
             }
-            if (rc == LIBEVDEV_READ_STATUS_SYNC) handle_sync_loss(dev);
+            if (rc == LIBEVDEV_READ_STATUS_SYNC) handle_sync_loss(captured);
             if (rc == -ENODEV) {
                 // Device removed.
                 for (size_t d = 0; d < devices_.size(); ++d) {

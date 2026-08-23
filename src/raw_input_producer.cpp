@@ -198,7 +198,12 @@ void RawInputProducer::run() {
 }
 
 bool RawInputProducer::start() {
-    if (thread_.joinable()) return false;
+    if (thread_.joinable()) {
+        // A previous start() failed after spawning (run() bailed on
+        // CreateWindow/RegisterRawInput): the thread exited but stayed
+        // joinable, which would block every future start() forever. Reap it.
+        thread_.join();
+    }
 
     try {
         thread_ = std::jthread([this] {
