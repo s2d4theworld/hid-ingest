@@ -92,7 +92,12 @@ bool EvdevProducer::discover_devices() {
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &wake_ev);
 
     struct udev* udev = udev_new();
-    if (!udev) { close(epoll_fd_); epoll_fd_ = -1; return false; }
+    if (!udev) {
+        // Full teardown: wake fd was already created above.
+        close(wake_fd_); wake_fd_ = -1;
+        close(epoll_fd_); epoll_fd_ = -1;
+        return false;
+    }
     struct udev_enumerate* enumerate = udev_enumerate_new(udev);
     udev_enumerate_add_match_subsystem(enumerate, "input");
     udev_enumerate_scan_devices(enumerate);
@@ -154,7 +159,14 @@ void EvdevProducer::run() {
         pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
     }
 
-    if (!discover_devices()) { fprintf(stderr, "[producer] no HID devices found\n"); return; }
+    if (!discover_devices()) {
+        // Early-out with full fd cleanup: discover_devices() may have created
+        // epoll/wake fds before failing to capture any device.
+        fprintf(stderr, "[producer] no HID devices found\n");
+        if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
+        if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
+        return;
+    }
     running_.store(true);
 
     epoll_event events[16];

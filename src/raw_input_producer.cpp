@@ -13,7 +13,10 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA,
                           reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
-        return TRUE;
+        // Canonical pattern: attach userdata, then still forward to
+        // DefWindowProc so internal WM_NCCREATE init (window text storage,
+        // state) completes.
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     if (!self)
         return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -33,21 +36,28 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                                          RID_INPUT, raw_buffer, &size,
                                          sizeof(RAWINPUTHEADER));
 
-            if (bytes == static_cast<UINT>(-1) &&
-                size > kStackCap && size <= kHeapCap) {
-                BYTE* heap_buf = static_cast<BYTE*>(malloc(size));
-                if (heap_buf) {
-                    UINT heap_size = size;
-                    bytes = GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam),
-                                            RID_INPUT, heap_buf, &heap_size,
-                                            sizeof(RAWINPUTHEADER));
-                    if (bytes != static_cast<UINT>(-1)) {
-                        ++self->oversize_count_;  // telemetry: complex device present
-                        auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
-                        if (raw->header.dwType == RIM_TYPEMOUSE)
-                            self->emit_mouse_sample(raw->data.mouse);
+            if (bytes == static_cast<UINT>(-1)) {
+                // Either the packet needs >kStackCap (retry on heap, capped at
+                // kHeapCap) or it exceeds even kHeapCap — in which case it is
+                // deliberately dropped (only mice are parsed; such sizes come
+                // from exotic digitizer collections) and counted so the drop
+                // is visible in telemetry.
+                ++self->oversize_dropped_;
+                if (size > kStackCap && size <= kHeapCap) {
+                    BYTE* heap_buf = static_cast<BYTE*>(malloc(size));
+                    if (heap_buf) {
+                        UINT heap_size = size;
+                        bytes = GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam),
+                                                RID_INPUT, heap_buf, &heap_size,
+                                                sizeof(RAWINPUTHEADER));
+                        if (bytes != static_cast<UINT>(-1)) {
+                            ++self->oversize_count_;  // telemetry: complex device present
+                            auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
+                            if (raw->header.dwType == RIM_TYPEMOUSE)
+                                self->emit_mouse_sample(raw->data.mouse);
+                        }
+                        free(heap_buf);
                     }
-                    free(heap_buf);
                 }
                 // CRITICAL: forward so the system cleans up the handle.
                 return DefWindowProcW(hwnd, WM_INPUT, wparam, lparam);
@@ -161,11 +171,15 @@ void RawInputProducer::run() {
         MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_POSTMESSAGE,
                                     MWMO_INPUTAVAILABLE);
 
+        // NOTE: WM_QUIT is thread-wide (NULL hwnd) and never passes an
+        // hwnd-filtered PeekMessage. We don't use PostQuitMessage for
+        // shutdown — stop() posts WM_APP and clears running_. WM_QUIT is
+        // only checked here via a second unfiltered peek so an external
+        // PostQuitMessage still ends the loop cleanly.
+        BOOL quit = PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+        if (quit) { running_.store(false, std::memory_order_relaxed); break; }
+
         while (PeekMessageW(&msg, hwnd_, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) {
-                running_.store(false, std::memory_order_relaxed);
-                break;
-            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
