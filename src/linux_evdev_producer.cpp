@@ -260,17 +260,13 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured, bool* has_pending
         switch (ev.type) {
             case EV_ABS:
                 // Mirror-only update (no sample push during resync).
-                // Same int32 clamp as the normal EV_ABS path — extreme ABS
+                // clamp24 matches the normal EV_ABS path — extreme ABS
                 // values during resync must not wrap the mirror.
                 if (ev.code == ABS_X) {
-                    const int64_t v = static_cast<int64_t>(ev.value) << 8;
-                    captured->last_x = static_cast<int32_t>(
-                        v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                    captured->last_x = clamp24(static_cast<int64_t>(ev.value) << 8);
                 }
                 if (ev.code == ABS_Y) {
-                    const int64_t v = static_cast<int64_t>(ev.value) << 8;
-                    captured->last_y = static_cast<int32_t>(
-                        v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                    captured->last_y = clamp24(static_cast<int64_t>(ev.value) << 8);
                 }
                 if (ev.code == ABS_PRESSURE) {
                     // Mirror pressure too: a stale value here would leak into
@@ -377,13 +373,13 @@ void EvdevProducer::run() {
                         // 24.8 like every other path (Win32, ABS), else the
                         // consumer sees samples 256x smaller.
                         if (ev.code == REL_X) {
-                            acc.dx = static_cast<int32_t>(
-                                static_cast<int64_t>(acc.dx) + (static_cast<int64_t>(ev.value) << 8));
+                            acc.dx = clamp24(static_cast<int64_t>(acc.dx) +
+                                             (static_cast<int64_t>(ev.value) << 8));
                             has_motion = true;
                         }
                         if (ev.code == REL_Y) {
-                            acc.dy = static_cast<int32_t>(
-                                static_cast<int64_t>(acc.dy) + (static_cast<int64_t>(ev.value) << 8));
+                            acc.dy = clamp24(static_cast<int64_t>(acc.dy) +
+                                             (static_cast<int64_t>(ev.value) << 8));
                             has_motion = true;
                         }
                         break;
@@ -393,16 +389,12 @@ void EvdevProducer::run() {
                         // to acc.dx (int32_t). Coordinates beyond ~8.3M after
                         // <<8 are out of spec for a 24.8 field.
                         if (ev.code == ABS_X) {
-                            const int64_t v = static_cast<int64_t>(ev.value) << 8;
-                            acc.dx = static_cast<int32_t>(
-                                v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                            acc.dx = clamp24(static_cast<int64_t>(ev.value) << 8);
                             captured->last_x = acc.dx;   // remember per-device position
                             has_motion = true;
                         }
                         if (ev.code == ABS_Y) {
-                            const int64_t v = static_cast<int64_t>(ev.value) << 8;
-                            acc.dy = static_cast<int32_t>(
-                                v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                            acc.dy = clamp24(static_cast<int64_t>(ev.value) << 8);
                             captured->last_y = acc.dy;
                             has_motion = true;
                         }

@@ -55,8 +55,9 @@ private:
     std::jthread    thread_;
     // Set true by the producer lambda right before it returns; lets start()'s
     // reap branch distinguish "thread finished" (safe to join) from "thread
-    // still live" (must not join — would hang).
-    std::atomic<bool> thread_exited_{true};
+    // still live" (must not join — would hang). Initialized false: no thread
+    // has run yet (mirrors the evdev producer's field).
+    std::atomic<bool> thread_exited_{false};
     std::atomic<bool> running_{false};
     // Only ever written by stop(). Separate from running_ because run()
     // stores true into running_ after setup and would otherwise resurrect

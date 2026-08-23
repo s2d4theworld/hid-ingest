@@ -145,21 +145,17 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
     HidSample sample{};
     if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
         constexpr int64_t kAbsMax = 65535;
-        sample.dx = static_cast<int32_t>(
-            static_cast<int64_t>(m.lLastX) * screen_w_ / kAbsMax) << 8;
-        sample.dy = static_cast<int32_t>(
-            static_cast<int64_t>(m.lLastY) * screen_h_ / kAbsMax) << 8;
+        // Scale in int64, shift in int64, then clamp once — precedence of
+        // `<<` over the int32 cast would otherwise narrow BEFORE the shift.
+        const int64_t dx = (static_cast<int64_t>(m.lLastX) * screen_w_ / kAbsMax) << 8;
+        const int64_t dy = (static_cast<int64_t>(m.lLastY) * screen_h_ / kAbsMax) << 8;
+        sample.dx = clamp24(dx);
+        sample.dy = clamp24(dy);
         sample.buttons |= 0x8000;  // absolute-coordinate flag
     } else {
-        // Same int64 discipline as the ABS path: shift before narrowing, so
-        // an extreme driver-reported delta is well-defined (saturating at
-        // the 24.8 field's representable range) instead of UB.
-        const int64_t dx = static_cast<int64_t>(m.lLastX) << 8;
-        const int64_t dy = static_cast<int64_t>(m.lLastY) << 8;
-        sample.dx = static_cast<int32_t>(
-            dx > INT32_MAX ? INT32_MAX : (dx < INT32_MIN ? INT32_MIN : dx));
-        sample.dy = static_cast<int32_t>(
-            dy > INT32_MAX ? INT32_MAX : (dy < INT32_MIN ? INT32_MIN : dy));
+        // Same discipline: shift in int64, clamp before narrowing.
+        sample.dx = clamp24(static_cast<int64_t>(m.lLastX) << 8);
+        sample.dy = clamp24(static_cast<int64_t>(m.lLastY) << 8);
     }
     // Push the mirrored held state (bits 0..2), not the raw transition
     // flags. Bit 15 absolute flag was set above.

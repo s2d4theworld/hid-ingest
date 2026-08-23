@@ -38,4 +38,12 @@ static_assert(std::is_trivially_copyable_v<HidSample>, "HidSample must be trivia
 constexpr inline int32_t ToFixed24_8(float v) { return static_cast<int32_t>(v * 256.0f); }
 constexpr inline float   FromFixed24_8(int32_t v) { return static_cast<float>(v) / 256.0f; }
 
+/// Saturate an int64 to the int32 range before narrowing into a 24.8 field.
+/// The single clamp used by every producer conversion site (Win32 ABS/REL,
+/// evdev ABS/REL/sync-loss) — keeps the shift-then-narrow discipline
+/// consistent and implementation-defined-free.
+constexpr inline int32_t clamp24(int64_t v) {
+    return v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : static_cast<int32_t>(v));
+}
+
 } // namespace hid

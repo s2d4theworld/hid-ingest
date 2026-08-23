@@ -142,7 +142,9 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
             const float len = std::sqrt(dist_sq(prev_pt, pt));
             // +1 matches the Catmull-Rom loop: even short segments advance at
             // least one sub-step so the tail never visually jumps a whole
-            // sample gap.
+            // sample gap. No 32-sub-step cap here (unlike the CR loop): the
+            // remainder is bounded by count (< kWindow + 3), so its total
+            // sub-step cost is inherently small.
             int steps = static_cast<int>(len / step_px) + 1;
             for (int s = 1; s <= steps && written < out_cap; ++s) {
                 const float t = static_cast<float>(s) / steps;
