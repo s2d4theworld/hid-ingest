@@ -126,10 +126,10 @@ static int test_interleaved_overflow() {
     bool first = true;
     HidSample out[64];
     for (int round = 0; round < 50000; ++round) {
-        const int pushes = 1 + (round * 7919) % 20;   // deterministic pseudo-random
+        const int pushes = 1 + static_cast<int>((round * 7919u) % 20u);  // unsigned: no UB
         for (int p = 0; p < pushes; ++p)
             ring.push(make(produced++));
-        const size_t n = ring.pop_batch(out, 1 + (round * 104729) % 32);
+        const size_t n = ring.pop_batch(out, 1 + (unsigned)(round * 104729u) % 32u);
         for (size_t i = 0; i < n; ++i) {
             if (!first && out[i].timestamp <= last) {
                 fprintf(stderr, "FAIL interleaved: %u after %u\n",

@@ -14,3 +14,6 @@ out/
 # OS
 Thumbs.db
 .DS_Store
+
+# Linux build dir
+build-linux/
