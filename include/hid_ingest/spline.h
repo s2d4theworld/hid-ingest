@@ -21,10 +21,10 @@ inline float dist_sq(Vec2 a, Vec2 b) {
 
 /// Chordal parameterization (alpha = 1) over points[0..n-1]: t advances by
 /// the Euclidean distance between consecutive points. NOTE: this is NOT
-/// centripetal (alpha = 0.5 would be pow(dist, 0.5)); the name is historical.
-/// The tangent math downstream is self-consistent with any monotonic dt.
+/// centripetal (alpha = 0.5 would be pow(dist, 0.5)); the tangent math
+/// downstream is self-consistent with any monotonic dt.
 /// t must have space for n entries. Returns total curve length parameter.
-inline float centripetal_times(const Vec2* pts, size_t n, float* t) {
+inline float chordal_times(const Vec2* pts, size_t n, float* t) {
     t[0] = 0.0f;
     for (size_t i = 1; i < n; ++i)
         t[i] = t[i - 1] + std::sqrt(dist_sq(pts[i], pts[i - 1]));
@@ -41,9 +41,9 @@ inline Vec2 hermite(Vec2 p0, Vec2 p1, Vec2 m0, Vec2 m1, float s) {
              h00*p0.y + h10*m0.y + h01*p1.y + h11*m1.y };
 }
 
-/// Evaluate the centripetal Catmull-Rom segment between p1 and p2 given the
+/// Evaluate the chordal Catmull-Rom segment between p1 and p2 given the
 /// 4-point window [p0..p3] and their parameterization times t[0..3], at
-/// u in (0,1). (Parameterization is chordal — see centripetal_times note.)
+/// u in (0,1). (Parameterization is chordal — see chordal_times note.)
 inline Vec2 catmull_rom_segment(const Vec2* p, const float* t, float u) {
     // Finite-difference tangents scaled by chord times (centripetal CR form).
     const float dt0 = t[1] - t[0], dt1 = t[2] - t[1], dt2 = t[3] - t[2];
@@ -100,7 +100,7 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
         for (size_t j = 0; j < n; ++j) {
             pts[j] = { FromFixed24_8(samples[i + j].dx), FromFixed24_8(samples[i + j].dy) };
         }
-        centripetal_times(pts, n, ts);
+        chordal_times(pts, n, ts);
         // NOTE: re-parameterizing per window means tangents near chunk seams
         // use slightly different chord times than a whole-batch fit would —
         // sub-pixel discontinuities at seams are possible. Acceptable for the

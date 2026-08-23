@@ -44,6 +44,12 @@ public:
         if (running_.load(std::memory_order_acquire))
             return false;  // already live
 
+        // Reap a dead thread from a previous failed start (e.g. no devices /
+        // discovery failure): it exited but stayed joinable. Move-assigning
+        // a joinable std::thread calls std::terminate().
+        if (thread_.joinable())
+            thread_.join();
+
         try { thread_ = std::thread([this] { run(); }); }
         catch (...) { return false; }
         // Wait briefly for run(): it sets running_ after discovery.
@@ -210,7 +216,10 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured) {
                 break;
             default: break;
         }
-    } while (true);
+    } while (rc == LIBEVDEV_READ_STATUS_SYNC);
+    // Loop exits on SUCCESS (sync queue drained — the next event would be
+    // NORMAL data, which must go through the normal path) or on any error
+    // (typically -EAGAIN when both queues are empty).
 }
 
 void EvdevProducer::run() {
@@ -372,9 +381,15 @@ void EvdevProducer::run() {
                         libevdev_free(devices_[d].dev);
                         close(devices_[d].fd);
                         devices_.erase(devices_.begin() + d);
-                        printf("[producer] device removed, %zu remain\n", devices_.size());
                         break;
                     }
+                }
+                printf("[producer] device removed, %zu remain\n", devices_.size());
+                if (devices_.empty()) {
+                    // Last device gone: producer is dead-functionality. Exit
+                    // cleanly so a subsequent start() can retry discovery.
+                    fprintf(stderr, "[producer] no devices remain, stopping\n");
+                    running_.store(false);
                 }
             }
         }
