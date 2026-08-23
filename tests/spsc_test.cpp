@@ -170,9 +170,8 @@ static int test_mt_stress() {
             if (!first && batch[i].timestamp <= last) {  // strict order invariant
                 fprintf(stderr, "FAIL mt_stress: %u after %u (consumed=%llu)\n",
                         batch[i].timestamp, last, (unsigned long long)consumed);
-                ++failures;
                 producer.join();
-                return 1;
+                return 1;   // main() counts the failure — no ++ here
             }
             first = false;
             last = batch[i].timestamp;

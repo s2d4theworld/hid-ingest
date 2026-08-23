@@ -159,6 +159,16 @@ private:
         uint16_t buttons = 0;
     };
 
+    /// Clamp + normalize an ABS_PRESSURE reading to 0..65535. Shared by the
+    /// normal path and sync-loss replay so the mirror and the sample stream
+    /// cannot diverge (e.g. one side rounding, the other truncating).
+    static uint16_t scale_pressure(struct libevdev* dev, int value) {
+        const int64_t raw_max = libevdev_get_abs_maximum(dev, ABS_PRESSURE);
+        const int64_t max_p = raw_max > 0 ? raw_max : 1023;
+        const int64_t v = value < 0 ? 0 : (value > max_p ? max_p : value);
+        return static_cast<uint16_t>(v * 65535 / max_p);
+    }
+
     void run();
     bool discover_devices();
     void handle_sync_loss(CapturedDevice* captured, bool* has_pending, input_event* pending);
@@ -302,13 +312,7 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured, bool* has_pending
                 if (ev.code == ABS_PRESSURE) {
                     // Mirror pressure too: a stale value here would leak into
                     // the next pressure-only sample after resync.
-                    const int64_t raw_max =
-                        libevdev_get_abs_maximum(captured->dev, ABS_PRESSURE);
-                    const int64_t max_p = raw_max > 0 ? raw_max : 1023;
-                    const int64_t v = ev.value < 0 ? 0
-                                    : (ev.value > max_p ? max_p : ev.value);
-                    captured->last_pressure =
-                        static_cast<uint16_t>(v * 65535 / max_p);
+                    captured->last_pressure = scale_pressure(captured->dev, ev.value);
                 }
                 break;
             case EV_KEY:
@@ -436,16 +440,9 @@ void EvdevProducer::run() {
                             has_motion = true;
                         }
                         if (ev.code == ABS_PRESSURE) {
-                            // Clamp: some devices report negative/odd values;
-                            // pressure must stay in [0, max] before scaling.
-                            // int64 math: v*65535 overflows int for max>32k.
-                            const int64_t raw_max =
-                                libevdev_get_abs_maximum(dev, ABS_PRESSURE);
-                            const int64_t max_p = raw_max > 0 ? raw_max : 1023;
-                            const int64_t v = ev.value < 0 ? 0
-                                        : (ev.value > max_p ? max_p : ev.value);
-                            acc.pressure =
-                                static_cast<uint16_t>(v * 65535 / max_p);
+                            // Shared helper keeps mirror and sample stream
+                            // identical (clamp + normalize in one place).
+                            acc.pressure = scale_pressure(dev, ev.value);
                             captured->last_pressure = acc.pressure;   // mirror
                             has_pressure = true;   // pressure-only samples are reportable
                         }
