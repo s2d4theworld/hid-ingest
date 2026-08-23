@@ -154,7 +154,7 @@ static int test_mt_stress() {
             HidSample s{};
             s.dx = static_cast<int32_t>(i & 0xFFFFFFFFull);
             s.dy = -s.dx;
-            s.timestamp = static_cast<uint32_t>(i);   // wraps at 2^32 — fine, < kCount*2
+            s.timestamp = static_cast<uint32_t>(i);   // 4M << 2^32, no wrap
             ring.push(s);                              // SPSC: producer only pushes
         }
         done.store(true, std::memory_order_release);

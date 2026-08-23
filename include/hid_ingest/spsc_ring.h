@@ -89,8 +89,11 @@ public:
     }
 
     size_t size_approx() const noexcept {
-        return head_.load(std::memory_order_acquire) -
-               tail_.load(std::memory_order_acquire);
+        // Clamp: called off-thread, head/tail loads can interleave so the
+        // unsigned subtraction transiently underflows.
+        const size_t h = head_.load(std::memory_order_acquire);
+        const size_t t = tail_.load(std::memory_order_acquire);
+        return h > t ? (h - t) : 0;
     }
     uint64_t dropped_approx() const noexcept { return drop_counter_; }
     static constexpr size_t capacity() noexcept { return Capacity; }

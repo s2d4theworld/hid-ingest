@@ -63,7 +63,7 @@ bool EvdevProducer::discover_devices() {
     if (epoll_fd_ < 0) return false;
 
     struct udev* udev = udev_new();
-    if (!udev) return false;
+    if (!udev) { close(epoll_fd_); epoll_fd_ = -1; return false; }
     struct udev_enumerate* enumerate = udev_enumerate_new(udev);
     udev_enumerate_add_match_subsystem(enumerate, "input");
     udev_enumerate_scan_devices(enumerate);
@@ -142,6 +142,7 @@ void EvdevProducer::run() {
 
             HidSample acc{};
             bool has_motion = false;
+            bool has_button_change = false;   // press OR release this packet
             int rc;
 
             while ((rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL, &ev))
@@ -172,15 +173,18 @@ void EvdevProducer::run() {
                             button_state_ = ev.value ? (button_state_ | 0x04)
                                                      : (button_state_ & static_cast<uint16_t>(~0x04));
                         if (ev.value) has_motion = true;  // press is a reportable event
+                        else has_button_change = true;    // release too (unstuck drag)
                         break;
                     case EV_SYN:
-                        if (ev.code == SYN_REPORT && (has_motion || button_state_)) {
+                        if (ev.code == SYN_REPORT &&
+                            (has_motion || has_button_change || button_state_)) {
                             acc.timestamp = static_cast<uint32_t>(
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
                             acc.buttons = button_state_;   // always current state
                             ring_.push(acc);
                             acc = {};
                             has_motion = false;
+                            has_button_change = false;
                         }
                         break;
                     default: break;
@@ -210,6 +214,6 @@ void EvdevProducer::run() {
     close(epoll_fd_);
 }
 
-} // namespace hid::linux
+} // namespace hid::evdev
 
 #endif // __linux__

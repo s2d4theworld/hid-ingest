@@ -20,44 +20,43 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
 
     switch (msg) {
         case WM_INPUT: {
-            alignas(8) uint8_t raw_buffer[sizeof(RAWINPUT) + 64];  // stack, no heap
-            UINT size = sizeof(raw_buffer);
+            // Fast path: stack buffer covers standard mice. Complex digitizer
+            // HID collections can be larger; on undersize, GetRawInputData
+            // returns (UINT)-1 and sets `size` to the required byte count —
+            // retry once with a heap buffer (rare path, capped at 4 KB).
+            constexpr UINT kStackCap = sizeof(RAWINPUT) + 64;
+            constexpr UINT kHeapCap  = 4096;   // bound the rare-path allocation
 
-            const UINT bytes = GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam),
-                                               RID_INPUT, raw_buffer, &size,
-                                               sizeof(RAWINPUTHEADER));
+            alignas(8) uint8_t raw_buffer[kStackCap];
+            UINT size = kStackCap;
+            UINT bytes = GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam),
+                                         RID_INPUT, raw_buffer, &size,
+                                         sizeof(RAWINPUTHEADER));
+
+            if (bytes == static_cast<UINT>(-1) &&
+                size > kStackCap && size <= kHeapCap) {
+                BYTE* heap_buf = static_cast<BYTE*>(malloc(size));
+                if (heap_buf) {
+                    UINT heap_size = size;
+                    bytes = GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam),
+                                            RID_INPUT, heap_buf, &heap_size,
+                                            sizeof(RAWINPUTHEADER));
+                    ++self->oversize_count_;   // telemetry: complex device present
+                    if (bytes != static_cast<UINT>(-1)) {
+                        auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
+                        if (raw->header.dwType == RIM_TYPEMOUSE)
+                            self->emit_mouse_sample(raw->data.mouse);
+                    }
+                    free(heap_buf);
+                }
+                // CRITICAL: forward so the system cleans up the handle.
+                return DefWindowProcW(hwnd, WM_INPUT, wparam, lparam);
+            }
+
             if (bytes != static_cast<UINT>(-1)) {
                 auto* raw = reinterpret_cast<RAWINPUT*>(raw_buffer);
-                const auto& m = raw->data.mouse;
-                if (raw->header.dwType == RIM_TYPEMOUSE &&
-                    (m.lLastX != 0 || m.lLastY != 0 ||
-                     (m.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP |
-                                         RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP |
-                                         RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_UP)))) {
-                    HidSample sample{};
-                    // Coordinate units: dx/dy are fixed-point 24.8 SCREEN-space
-                    // sub-pixels. Relative moves are already integer pixels ->
-                    // shift into 24.8. Absolute digitizer coords span 0..65535
-                    // -> scale to the primary screen size first (int64 math,
-                    // no overflow), then shift.
-                    if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
-                        constexpr int64_t kAbsMax = 65535;
-                        const int64_t scr_w = GetSystemMetrics(SM_CXSCREEN);
-                        const int64_t scr_h = GetSystemMetrics(SM_CYSCREEN);
-                        sample.dx = static_cast<int32_t>(
-                            m.lLastX * scr_w / kAbsMax) << 8;
-                        sample.dy = static_cast<int32_t>(
-                            m.lLastY * scr_h / kAbsMax) << 8;
-                        sample.buttons |= 0x8000;  // absolute-coordinate flag
-                    } else {
-                        sample.dx = m.lLastX << 8;
-                        sample.dy = m.lLastY << 8;
-                    }
-                    sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0xFFFF);
-                    LARGE_INTEGER qpc{};
-                    QueryPerformanceCounter(&qpc);
-                    sample.timestamp = static_cast<uint32_t>(qpc.QuadPart & 0xFFFFFFFFu);
-                    self->ring_.push(sample);   // DropOnOverflow handles full ring
+                if (raw->header.dwType == RIM_TYPEMOUSE) {
+                    self->emit_mouse_sample(raw->data.mouse);
                 }
             }
             // CRITICAL: forward so the system cleans up the handle and avoids re-delivery.
@@ -71,7 +70,7 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
             PostQuitMessage(0);
             return 0;
         default:
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
+            return DefWindowProcW(hwnd, msg, wparam, lparam);  // incl. WM_APP wake shot
     }
 }
 
@@ -91,6 +90,49 @@ bool RawInputProducer::register_raw_input(HWND hwnd) {
     devices[1].hwndTarget  = hwnd;
 
     return RegisterRawInputDevices(devices, 2, sizeof(RAWINPUTDEVICE)) != FALSE;
+}
+
+/// Build a HidSample from a RAWMOUSE packet and push it into the ring.
+/// Runs on the producer thread only.
+///
+/// Coordinate units: dx/dy are fixed-point 24.8 SCREEN-space sub-pixels.
+///  - Relative moves are integer pixels -> shift into 24.8.
+///  - Absolute digitizer coords span 0..65535 -> scale to the primary screen
+///    size first (int64 math, no overflow), then shift. NOTE: primary-screen
+///    scaling ignores multi-monitor virtual desktops and per-monitor DPI;
+///    see README.
+void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
+    const bool button_event =
+        m.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP |
+                           RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP |
+                           RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_UP);
+    if (m.lLastX == 0 && m.lLastY == 0 && !button_event)
+        return;   // nothing reportable in this packet
+
+    HidSample sample{};
+    if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
+        constexpr int64_t kAbsMax = 65535;
+        const int64_t scr_w = GetSystemMetrics(SM_CXSCREEN);
+        const int64_t scr_h = GetSystemMetrics(SM_CYSCREEN);
+        sample.dx = static_cast<int32_t>(
+            static_cast<int64_t>(m.lLastX) * scr_w / kAbsMax) << 8;
+        sample.dy = static_cast<int32_t>(
+            static_cast<int64_t>(m.lLastY) * scr_h / kAbsMax) << 8;
+        sample.buttons |= 0x8000;  // absolute-coordinate flag
+    } else {
+        sample.dx = m.lLastX << 8;
+        sample.dy = m.lLastY << 8;
+    }
+    sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0xFFFF);
+
+    // Timestamp basis: raw QPC truncated to 32 bits (~71 min wrap on typical
+    // 10 MHz counters). Valid for per-platform DELTAS only, not absolute
+    // comparisons across platforms or long spans.
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    sample.timestamp = static_cast<uint32_t>(qpc.QuadPart & 0xFFFFFFFFu);
+
+    ring_.push(sample);   // DropOnOverflow handles full ring
 }
 
 void RawInputProducer::run() {
@@ -125,7 +167,6 @@ void RawInputProducer::run() {
             DispatchMessageW(&msg);
         }
     }
-
     DestroyWindow(hwnd_);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
@@ -153,11 +194,12 @@ bool RawInputProducer::start() {
 
 void RawInputProducer::stop() {
     if (!thread_.joinable()) return;
-    // hwnd_ lives entirely on the producer thread; running_=false makes the
-    // message loop exit, which destroys the window before join() returns.
-    // After join there is no concurrent access to hwnd_, so nulling it here
-    // is race-free. (PostMessageW from this thread was removed: it raced with
-    // window creation/teardown on the producer thread.)
+    // Wake the blocked MsgWaitForMultipleObjectsEx with a harmless posted
+    // message. Safe: hwnd_ was created before running_ went true (start()
+    // waits for running_), and stop() only proceeds when thread_ is live,
+    // so the window exists for the whole lifetime of this call. The loop
+    // exits via running_, then DestroyWindow happens on the producer thread.
+    if (hwnd_) PostMessageW(hwnd_, WM_APP, 0, 0);
     running_.store(false, std::memory_order_relaxed);
     thread_.join();
     hwnd_ = nullptr;

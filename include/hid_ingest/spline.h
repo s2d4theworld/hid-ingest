@@ -74,9 +74,16 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
     float ts[kWindow];
 
     size_t written = 0;
+    Vec2 prev{0.f, 0.f};
+    bool have_prev = false;
     auto emit = [&](Vec2 v) -> bool {
+        // Dedupe: chunk seams and the tail point can coincide with the last
+        // emitted vertex; zero-length segments are harmless but wasteful.
+        if (have_prev && v.x == prev.x && v.y == prev.y) return true;
         if (written >= out_cap) return false;
         out[written++] = v;
+        prev = v;
+        have_prev = true;
         return true;
     };
 

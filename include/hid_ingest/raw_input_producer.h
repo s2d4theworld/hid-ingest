@@ -42,6 +42,7 @@ private:
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
     void run();
     bool register_raw_input(HWND hwnd);
+    void emit_mouse_sample(const RAWMOUSE& m);   // called on the producer thread
 
     SpscRing<>&     ring_;
     ProducerConfig  cfg_;
@@ -49,6 +50,7 @@ private:
     std::atomic<bool> running_{false};
     HWND            hwnd_ = nullptr;
     DWORD           thread_id_ = 0;
+    uint64_t        oversize_count_ = 0;   // telemetry: packets needing heap retry
 };
 
 } // namespace hid::win32

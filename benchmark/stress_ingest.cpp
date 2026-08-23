@@ -14,7 +14,7 @@ using hid::HidSample;
 using hid::SpscRing;
 
 int main(int argc, char** argv) {
-    uint64_t target = 100'000'000;   // spec: 10^8
+    uint64_t target = 10'000'000;   // ~21 min at 8 kHz; spec's 10^8 via argv
     if (argc > 1) target = std::strtoull(argv[1], nullptr, 10);
     const auto interval = std::chrono::microseconds(125);  // 8 kHz
 
