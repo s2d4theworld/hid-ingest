@@ -39,10 +39,11 @@ public:
     bool running() const noexcept { return running_.load(std::memory_order_relaxed); }
 
     // Telemetry: complex packets parsed via heap retry / dropped as too
-    // large. Both producer-thread-written; read before stop() for a stable
-    // snapshot.
+    // large / RIM_TYPEHID (digitizer) packets counted + dropped unparsed.
+    // All producer-thread-written; read before stop() for a stable snapshot.
     uint64_t oversize_count() const noexcept { return oversize_count_; }
     uint64_t oversize_dropped() const noexcept { return oversize_dropped_; }
+    uint64_t hid_unparsed() const noexcept { return hid_unparsed_; }
 
 private:
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -73,6 +74,8 @@ private:
     // approximate counters; see spsc_ring drop_counter_ precedent).
     std::atomic<uint64_t> oversize_count_{0};     // complex packets parsed via heap retry
     std::atomic<uint64_t> oversize_dropped_{0};   // packets dropped (too large / retry failed)
+    std::atomic<uint64_t> hid_unparsed_{0};       // RIM_TYPEHID packets counted + dropped
+                                                  // (digitizer parse out of scope)
     int64_t         screen_w_ = 0;         // cached at run() start (primary screen)
     int64_t         screen_h_ = 0;
     // Mirrored HELD-STATE of L/R/M buttons (producer thread only). Raw Input

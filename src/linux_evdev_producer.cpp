@@ -100,6 +100,11 @@ public:
         return running_.load(std::memory_order_acquire);
     }
     void stop() {
+        // THREAD-SAFETY: stop() is not thread-safe against itself — two
+        // concurrent callers can both pass the joinable check and join the
+        // same thread (UB). Single-owner lifecycle: exactly one caller owns
+        // shutdown. Same contract as RawInputProducer::stop().
+        //
         // Separate flag: running_ is owned by run() (it stores true after
         // discovery), so clearing it here could be resurrected by a racing
         // run(). stop_requested_ is only ever written by stop().

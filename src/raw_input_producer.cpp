@@ -74,6 +74,13 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                 auto* raw = reinterpret_cast<RAWINPUT*>(raw_buffer);
                 if (raw->header.dwType == RIM_TYPEMOUSE) {
                     self->emit_mouse_sample(raw->data.mouse);
+                } else if (raw->header.dwType == RIM_TYPEHID) {
+                    // Digitizer/stylus (UsagePage 0x0D) arrives as RIM_TYPEHID.
+                    // Parsing raw HID reports is out of scope — the
+                    // registration exists so the device is claimed by this
+                    // window rather than another Raw Input consumer, but its
+                    // packets are counted and dropped here.
+                    self->hid_unparsed_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
             // CRITICAL: forward so the system cleans up the handle and avoids re-delivery.
@@ -323,6 +330,11 @@ bool RawInputProducer::start() {
 }
 
 void RawInputProducer::stop() {
+    // THREAD-SAFETY: stop() is not thread-safe against itself — two
+    // concurrent callers can both pass the joinable check and join the
+    // same thread (UB). Single-owner lifecycle: exactly one caller owns
+    // shutdown. Same contract as EvdevProducer::stop().
+    //
     // Set the flag FIRST so a run() still in setup bails before storing
     // running_=true (resurrection prevention — same pattern as evdev).
     stop_requested_.store(true, std::memory_order_release);
