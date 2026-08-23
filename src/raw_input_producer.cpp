@@ -291,7 +291,10 @@ bool RawInputProducer::start() {
         Sleep(10);
 
     if (stop_requested_.load(std::memory_order_acquire)) {
-        hwnd_ = nullptr;   // run()'s exit path destroyed it; drop our dangling copy
+        // run()'s exit path already destroyed the window and reset hwnd_
+        // (its write happens-before our read via thread_exited_/stop
+        // synchronization). Do NOT touch hwnd_ here — a concurrent writer
+        // would be an unsynchronized data race.
         return false;
     }
     return running_.load(std::memory_order_acquire);

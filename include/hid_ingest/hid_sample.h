@@ -19,9 +19,13 @@ struct HidSample {
                           // MOUSE_MOVE_ABSOLUTE path).
     uint32_t timestamp;   // PER-PLATFORM basis, deltas only — NOT comparable
                           // across producers: Win32 = raw QPC ticks (32-bit
-                          // truncation, ~100 ns @ 10 MHz, wraps ~71 min);
-                          // Linux = kernel event time in wall-clock us.
-                          // Consumers must compute deltas within one producer.
+                          // truncation, ~100 ns @ 10 MHz); Linux = kernel
+                          // event time in wall-clock us. BOTH WRAP the 32-bit
+                          // space (~71 min on both platforms). Consumers must
+                          // compute deltas as unsigned uint32 subtraction,
+                          // which is automatically wrap-safe; never compare
+                          // raw timestamps or use signed deltas across a
+                          // producer's lifetime.
     // SCOPE: motion + buttons + (Linux) pressure only. Mouse wheel input is
     // deliberately not captured — there is no wheel field in this struct.
 };

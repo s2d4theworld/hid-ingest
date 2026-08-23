@@ -120,16 +120,20 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
                 emit(catmull_rom_segment(p, tt, static_cast<float>(s) / steps));
             }
         }
-        // Overlap by 3 points so the next window's first CR segment starts
-        // where this one ended (seg max here is n-3: pts[n-3]->pts[n-2] was
-        // the last segment splined; pts[n-2]->pts[n-1] belongs to the next
-        // window as its leading segment). Only the final short window (no
-        // next window follows) advances past everything.
-        if (count - i > n) i += n - 3; else i += n;
+        // Window advance: when a next window follows, overlap by 3 points so
+        // its first CR segment continues where this one ended (seg max here
+        // is n-3: pts[n-3]->pts[n-2] was the last segment splined;
+        // pts[n-2]->pts[n-1] becomes the next window's leading segment).
+        // For the FINAL window (no next window), the last CR segment is
+        // pts[n-3]->pts[n-2], so advance only past that — samples[i+n-2]
+        // and samples[i+n-1] fall through to the remainder pass, which
+        // renders their connecting segment explicitly.
+        if (count - i > n) i += n - 3; else i += n - 1;
     }
 
-    // Remainder: fewer than 4 unprocessed points remain after the last
-    // spline window. Emit them as straight segments so interior samples are
+    // Remainder: unprocessed points remain after the last spline window
+    // (fewer than 4 for the final window, or the last two points of a full
+    // final window). Emit them as straight segments so interior samples are
     // not dropped geometrically (the Catmull-Rom loop needs a 4-point window).
     if (i + 1 < count && written < out_cap) {
         Vec2 prev_pt = { FromFixed24_8(samples[i].dx), FromFixed24_8(samples[i].dy) };
