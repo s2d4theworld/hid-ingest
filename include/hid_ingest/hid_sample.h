@@ -36,18 +36,17 @@ static_assert(std::is_trivially_copyable_v<HidSample>, "HidSample must be trivia
 
 // Fixed-point 24.8 helpers.
 //
-/// Saturating float -> 24.8 conversion. A plain static_cast is UB when the
-/// product falls outside int32; this clamps to the representable range so
-/// library consumers get the same narrowing discipline as the producers'
-/// clamp24().
+/// Saturating float -> 24.8 conversion. Bounds are checked POST-SCALE
+/// against the 24.8 representable range (|v| <= 8388607 before <<8), so
+/// both the multiply and the cast are well-defined — a plain
+/// static_cast<int32_t>(v * 256.0f) is UB for |v| > ~8.4e6, and NaN falls
+/// through every comparison to the cast as well.
 constexpr inline int32_t ToFixed24_8(float v) {
-    // Compare against exact float bounds before casting (INT32_MAX does not
-    // round-trip exactly through float, so use next-lower powers of two).
-    constexpr float kMax = 2147483520.0f;   // largest float < 2^31
-    constexpr float kMin = -2147483648.0f;
-    return v > kMax ? INT32_MAX
-         : v < kMin ? INT32_MIN
-         : static_cast<int32_t>(v * 256.0f);
+    constexpr float kMax =  8388607.0f;   // 2^23 - 1: max representable pre-scale
+    constexpr float kMin = -8388608.0f;   // 2^23
+    if (!(v >= kMin)) return INT32_MIN;   // catches NaN too
+    if (v > kMax)     return INT32_MAX;
+    return static_cast<int32_t>(v * 256.0f);
 }
 constexpr inline float   FromFixed24_8(int32_t v) { return static_cast<float>(v) / 256.0f; }
 

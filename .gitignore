@@ -14,3 +14,6 @@ out/
 # OS
 Thumbs.db
 .DS_Store
+
+# Stray test binary
+spsc_test_gcc
