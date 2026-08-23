@@ -65,10 +65,6 @@ public:
     }
 
 private:
-    void run();
-    bool discover_devices();
-    void handle_sync_loss(CapturedDevice* captured);
-
     struct CapturedDevice {
         int fd;
         struct libevdev* dev;
@@ -80,6 +76,10 @@ private:
         // would clear the mouse's held button.
         uint16_t buttons = 0;
     };
+
+    void run();
+    bool discover_devices();
+    void handle_sync_loss(CapturedDevice* captured);
 
     SpscRing<>& ring_;
     EvdevProducerConfig cfg_;
