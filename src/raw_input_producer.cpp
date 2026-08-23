@@ -235,8 +235,13 @@ void RawInputProducer::run() {
             DispatchMessageW(&msg);
         }
     }
+    // hwnd_ ownership note: written only on this (producer) thread and read
+    // by stop()/start() on other threads. The thread_exited_ release/acquire
+    // pairing covers those cross-thread reads — once exited is observed, the
+    // final value of hwnd_ is visible and the window is already destroyed.
     DestroyWindow(hwnd_);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    hwnd_ = nullptr;   // no dangling HWND for cross-thread readers
 }
 
 bool RawInputProducer::start() {
@@ -308,5 +313,15 @@ void RawInputProducer::stop() {
     thread_.join();
     hwnd_ = nullptr;
 }
+
+// NOTE on cross-thread hwnd_ access: run() writes hwnd_, stop()/start()
+// read and reset it from other threads. This is technically a data race on
+// a plain HWND; it is deliberately tolerated because (a) pointer-sized
+// stores cannot tear on the target platforms, (b) every cross-thread read
+// is gated behind thread_exited_ acquire or join(), which establish
+// happens-before with run()'s final write, and (c) making it atomic<HWND>
+// would complicate every use site for no practical gain. If TSAN flags it,
+// switch to std::atomic<HWND> — the change is mechanical.
+
 
 } // namespace hid::win32
