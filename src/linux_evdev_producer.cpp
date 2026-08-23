@@ -68,7 +68,16 @@ public:
             devices_.clear();
         }
 
-        try { thread_ = std::thread([this] { run(); }); }
+        try {
+            thread_ = std::thread([this] {
+                run();
+                // Mark exited on EVERY exit path (discovery failure,
+                // stop-requested bail, normal loop end) so start()'s reap
+                // branch can always distinguish a finished thread from a
+                // live one. Release pairs with the reap's acquire load.
+                thread_exited_.store(true, std::memory_order_release);
+            });
+        }
         catch (...) { return false; }
         // Wait briefly for run(): it sets running_ after discovery. If stop()
         // raced us and set stop_requested_, running_ will never come up —
@@ -503,10 +512,6 @@ void EvdevProducer::run() {
     // reasoning as the no-devices early-out above). stop() performs the
     // final teardown after join(); if stop() is never called, start()'s
     // reap branch closes them before spawning a new thread.
-
-    // Signal start()'s reap branch that this thread has finished and it is
-    // safe to join + tear down fds.
-    thread_exited_.store(true, std::memory_order_release);
 }
 
 } // namespace hid::evdev
