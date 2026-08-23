@@ -114,10 +114,13 @@ public:
         // run(). stop_requested_ is only ever written by stop().
         stop_requested_.store(true, std::memory_order_release);
         running_.store(false);
-        // Break the blocked epoll_wait (timeout is infinite): a write to the
-        // eventfd makes it return with the wake fd ready. Safe: run() never
-        // closes these fds — it leaves them for this function's teardown
-        // after join(), so there is no check/close race.
+        // Break the blocked epoll_wait: a write to the eventfd makes it
+        // return with the wake fd ready. KNOWN LIMITATION (TOCTOU): if this
+        // write races a discovery-phase failure that closes wake_fd_, the
+        // write can land on a recycled descriptor number — harmless in
+        // practice (input nodes ignore writes) but real. Mitigated by the
+        // 100 ms epoll_wait timeout in run(), which guarantees the loop
+        // re-checks running_ even if the wake write is lost.
         if (wake_fd_ != -1) {
             const uint64_t one = 1;
             ssize_t r = write(wake_fd_, &one, sizeof(one));
@@ -294,8 +297,9 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured, bool* has_pending
                 if (ev.code == ABS_PRESSURE) {
                     // Mirror pressure too: a stale value here would leak into
                     // the next pressure-only sample after resync.
-                    const int64_t max_p =
-                        libevdev_get_abs_maximum(captured->dev, ABS_PRESSURE) ?: 1023;
+                    const int64_t raw_max =
+                        libevdev_get_abs_maximum(captured->dev, ABS_PRESSURE);
+                    const int64_t max_p = raw_max > 0 ? raw_max : 1023;
                     const int64_t v = ev.value < 0 ? 0
                                     : (ev.value > max_p ? max_p : ev.value);
                     captured->last_pressure =
@@ -355,8 +359,13 @@ void EvdevProducer::run() {
     input_event ev;
 
     while (running_.load()) {
-        const int nfds = epoll_wait(epoll_fd_, events, 16, -1);
+        // Bounded timeout (100 ms): a fallback wake path. stop() normally
+        // writes the eventfd, but if that write raced discovery teardown and
+        // landed on a recycled fd, this timeout guarantees the loop still
+        // observes running_ == false and exits — no permanent hang.
+        const int nfds = epoll_wait(epoll_fd_, events, 16, 100);
         if (nfds < 0) { if (errno == EINTR) continue; break; }
+        if (nfds == 0) continue;   // timeout: re-check running_
 
         for (int i = 0; i < nfds; ++i) {
             // Wake fd: shutdown signal — drain it and let the loop check exit.
@@ -425,8 +434,9 @@ void EvdevProducer::run() {
                             // Clamp: some devices report negative/odd values;
                             // pressure must stay in [0, max] before scaling.
                             // int64 math: v*65535 overflows int for max>32k.
-                            const int64_t max_p =
-                                libevdev_get_abs_maximum(dev, ABS_PRESSURE) ?: 1023;
+                            const int64_t raw_max =
+                                libevdev_get_abs_maximum(dev, ABS_PRESSURE);
+                            const int64_t max_p = raw_max > 0 ? raw_max : 1023;
                             const int64_t v = ev.value < 0 ? 0
                                         : (ev.value > max_p ? max_p : ev.value);
                             acc.pressure =
