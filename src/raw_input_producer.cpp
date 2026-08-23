@@ -49,10 +49,17 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                                                 RID_INPUT, heap_buf, &heap_size,
                                                 sizeof(RAWINPUTHEADER));
                         if (bytes != static_cast<UINT>(-1)) {
-                            self->oversize_count_.fetch_add(1, std::memory_order_relaxed);  // telemetry: complex device present
                             auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
-                            if (raw->header.dwType == RIM_TYPEMOUSE)
+                            if (raw->header.dwType == RIM_TYPEMOUSE) {
+                                // Genuinely oversized MOUSE packet parsed.
+                                self->oversize_count_.fetch_add(1, std::memory_order_relaxed);
                                 self->emit_mouse_sample(raw->data.mouse);
+                            } else {
+                                // Oversized RIM_TYPEHID (digitizer) — parse
+                                // out of scope; count as HID unparsed, not
+                                // "complex mouse parsed".
+                                self->hid_unparsed_.fetch_add(1, std::memory_order_relaxed);
+                            }
                         } else {
                             self->oversize_dropped_.fetch_add(1, std::memory_order_relaxed);  // retry failed
                         }
@@ -264,8 +271,14 @@ void RawInputProducer::run() {
 }
 
 bool RawInputProducer::start() {
+    // THREAD-SAFETY: start()/stop() must be serialized externally by the
+    // object's owner. Concurrent start-vs-stop can interleave the
+    // stop_requested_ reset (below) with a racing stop() store, losing a
+    // shutdown request; the destructor is safe (it only calls stop()).
     if (running_.load(std::memory_order_acquire))
         return false;  // already live: double-start would deadlock the join below
+    if (stop_requested_.load(std::memory_order_acquire))
+        return false;  // shutdown already requested — do not resurrect
     stop_requested_.store(false, std::memory_order_release);
 
     if (thread_.joinable()) {

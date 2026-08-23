@@ -23,6 +23,14 @@
 //         release store of tail_ (free slots).
 #pragma once
 
+// MSVC C4324 ("structure was padded due to alignment specifier") fires on
+// every SpscRing instantiation. The padding is the deliberate cache-line
+// isolation this header exists to provide — silence it scoped.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4324)
+#endif
+
 #include <atomic>
 #include <cstddef>
 #include <new>
@@ -119,3 +127,7 @@ private:
 static_assert(std::is_standard_layout_v<SpscRing<>>);
 
 } // namespace hid
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

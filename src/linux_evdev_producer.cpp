@@ -42,8 +42,12 @@ public:
     /// Calling start() on an already-live producer returns false — move-
     /// assigning a joinable std::thread would call std::terminate().
     bool start() {
+        // THREAD-SAFETY: start()/stop() must be serialized externally by the
+        // object's owner (same contract as RawInputProducer::start()).
         if (running_.load(std::memory_order_acquire))
             return false;  // already live
+        if (stop_requested_.load(std::memory_order_acquire))
+            return false;  // shutdown already requested — do not resurrect
         stop_requested_.store(false, std::memory_order_release);
 
         // Reap a dead thread from a previous failed start (e.g. no devices /
