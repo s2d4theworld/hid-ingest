@@ -70,6 +70,9 @@ private:
         // button-only SYN frames reuse it instead of emitting (0,0).
         int32_t last_x = 0;
         int32_t last_y = 0;
+        // Per-device button state: a shared field was wrong — a tablet press
+        // would clear the mouse's held button.
+        uint16_t buttons = 0;
     };
 
     SpscRing<>& ring_;
@@ -79,9 +82,6 @@ private:
     int epoll_fd_ = -1;
     int wake_fd_ = -1;   // eventfd: written by stop() to break epoll_wait
     std::vector<CapturedDevice> devices_;
-    // Persistent button state: survives EV_SYN resets of the per-sample
-    // accumulator, so mid-drag samples report the held buttons.
-    uint16_t button_state_ = 0;
 };
 
 bool EvdevProducer::discover_devices() {
@@ -217,8 +217,19 @@ void EvdevProducer::run() {
                    == LIBEVDEV_READ_STATUS_SUCCESS) {
                 switch (ev.type) {
                     case EV_REL:
-                        if (ev.code == REL_X) { acc.dx += ev.value; has_motion = true; }
-                        if (ev.code == REL_Y) { acc.dy += ev.value; has_motion = true; }
+                        // Relative counts are integer pixels -> convert to
+                        // 24.8 like every other path (Win32, ABS), else the
+                        // consumer sees samples 256x smaller.
+                        if (ev.code == REL_X) {
+                            acc.dx = static_cast<int32_t>(
+                                static_cast<int64_t>(acc.dx) + (static_cast<int64_t>(ev.value) << 8));
+                            has_motion = true;
+                        }
+                        if (ev.code == REL_Y) {
+                            acc.dy = static_cast<int32_t>(
+                                static_cast<int64_t>(acc.dy) + (static_cast<int64_t>(ev.value) << 8));
+                            has_motion = true;
+                        }
                         break;
                     case EV_ABS:
                         // Clamp to int32 range BEFORE narrowing: the int64
@@ -242,9 +253,10 @@ void EvdevProducer::run() {
                         if (ev.code == ABS_PRESSURE) {
                             // Clamp: some devices report negative/odd values;
                             // pressure must stay in [0, max] before scaling.
-                            const int max_p =
+                            // int64 math: v*65535 overflows int for max>32k.
+                            const int64_t max_p =
                                 libevdev_get_abs_maximum(dev, ABS_PRESSURE) ?: 1023;
-                            const int v = ev.value < 0 ? 0
+                            const int64_t v = ev.value < 0 ? 0
                                         : (ev.value > max_p ? max_p : ev.value);
                             acc.pressure =
                                 static_cast<uint16_t>(v * 65535 / max_p);
@@ -252,17 +264,18 @@ void EvdevProducer::run() {
                         }
                         break;
                     case EV_KEY:
-                        // Persistent state: update button_state_ (survives
-                        // EV_SYN accumulator reset), then copy into acc.
+                        // Per-device persistent button state (survives EV_SYN
+                        // accumulator resets). Shared button_state_ was a bug:
+                        // a tablet press would clear the mouse's held button.
                         if (ev.code == BTN_LEFT)
-                            button_state_ = ev.value ? (button_state_ | 0x01)
-                                                     : (button_state_ & static_cast<uint16_t>(~0x01));
+                            captured->buttons = ev.value ? (captured->buttons | 0x01)
+                                                         : (captured->buttons & static_cast<uint16_t>(~0x01));
                         if (ev.code == BTN_RIGHT)
-                            button_state_ = ev.value ? (button_state_ | 0x02)
-                                                     : (button_state_ & static_cast<uint16_t>(~0x02));
+                            captured->buttons = ev.value ? (captured->buttons | 0x02)
+                                                         : (captured->buttons & static_cast<uint16_t>(~0x02));
                         if (ev.code == BTN_MIDDLE)
-                            button_state_ = ev.value ? (button_state_ | 0x04)
-                                                     : (button_state_ & static_cast<uint16_t>(~0x04));
+                            captured->buttons = ev.value ? (captured->buttons | 0x04)
+                                                         : (captured->buttons & static_cast<uint16_t>(~0x04));
                         // Only tracked buttons (LEFT/RIGHT/MIDDLE) count as
                         // reportable changes. BTN_TOOL_* (pen/finger
                         // proximity) and untracked side buttons do not push a
@@ -272,9 +285,13 @@ void EvdevProducer::run() {
                             has_button_change = true;
                         break;
                     case EV_SYN:
+                        // Push only on actual activity this frame. Held
+                        // buttons do NOT force a push: their state is already
+                        // carried in acc.buttons of every pushed sample, and
+                        // per-frame re-pushes would flood the ring on
+                        // high-report-rate devices.
                         if (ev.code == SYN_REPORT &&
-                            (has_motion || has_button_change || has_pressure ||
-                             button_state_)) {
+                            (has_motion || has_button_change || has_pressure)) {
                             acc.timestamp = static_cast<uint32_t>(
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
                             // Absolute devices that did not resend X/Y this
@@ -284,7 +301,7 @@ void EvdevProducer::run() {
                                 acc.dx = captured->last_x;
                                 acc.dy = captured->last_y;
                             }
-                            acc.buttons = button_state_;   // always current state
+                            acc.buttons = captured ? captured->buttons : 0;
                             ring_.push(acc);
                             acc = {};
                             has_motion = false;
