@@ -1,5 +1,5 @@
 // hid_ingest/spline.h
-// Centripetal Catmull-Rom fitting + cubic Hermite evaluation — spec section 6.
+// Chordal Catmull-Rom fitting + cubic Hermite evaluation — spec section 6.
 // Fixed-point-friendly, allocation-free, operates on 24.8 coordinates.
 #pragma once
 
@@ -67,9 +67,14 @@ inline Vec2 catmull_rom_segment(const Vec2* p, const float* t, float u) {
 
 /// Interpolate a batch of samples into `out` vertices with adaptive step size.
 /// Returns number of vertices written. Allocation-free.
+///
+/// step_px must be > 0: non-positive or NaN values are clamped to 1 px at
+/// entry (a zero/negative step would make len/step infinite, and
+/// static_cast<int>(inf) is UB; a tiny step could spin ~1e11 sub-steps).
 inline size_t interpolate_batch(const HidSample* samples, size_t count,
                                 float step_px, Vec2* out, size_t out_cap) {
     if (count == 0 || out_cap == 0) return 0;
+    if (!(step_px > 0.0f)) step_px = 1.0f;   // catches NaN and <= 0
 
     // Convert fixed 24.8 to float once into a local window buffer.
     // Max window of 64 keeps us in L1; longer batches are processed in chunks.
@@ -142,10 +147,10 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
             const float len = std::sqrt(dist_sq(prev_pt, pt));
             // +1 matches the Catmull-Rom loop: even short segments advance at
             // least one sub-step so the tail never visually jumps a whole
-            // sample gap. No 32-sub-step cap here (unlike the CR loop): the
-            // remainder is bounded by count (< kWindow + 3), so its total
-            // sub-step cost is inherently small.
+            // sample gap. Capped at 32 like the CR loop — a very long
+            // straight remainder segment does not need hundreds of vertices.
             int steps = static_cast<int>(len / step_px) + 1;
+            if (steps > 32) steps = 32;
             for (int s = 1; s <= steps && written < out_cap; ++s) {
                 const float t = static_cast<float>(s) / steps;
                 emit({ prev_pt.x + (pt.x - prev_pt.x) * t,

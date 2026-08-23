@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <thread>
 
 #include "hid_ingest/spsc_ring.h"
@@ -190,7 +191,29 @@ static int test_mt_stress() {
     return 0;
 }
 
+// Fixed-point 24.8 helpers: saturation bounds, NaN handling, clamp24 edges.
+static int test_fixed_point() {
+    // Post-scale bounds: |v| > 8388607 must saturate, not UB-cast.
+    CHECK(hid::ToFixed24_8(9.0e6f) == INT32_MAX);
+    CHECK(hid::ToFixed24_8(-9.0e6f) == INT32_MIN);
+    // NaN falls through every comparison -> deterministic INT32_MIN.
+    CHECK(hid::ToFixed24_8(std::numeric_limits<float>::quiet_NaN()) == INT32_MIN);
+    // Boundary values round-trip exactly.
+    CHECK(hid::ToFixed24_8(8388607.0f) == 8388607 * 256);
+    CHECK(hid::ToFixed24_8(-8388608.0f) == -8388608 * 256);
+    // Zero.
+    CHECK(hid::ToFixed24_8(0.0f) == 0);
+
+    // clamp24 edges.
+    CHECK(hid::clamp24(static_cast<int64_t>(INT32_MAX) + 1) == INT32_MAX);
+    CHECK(hid::clamp24(static_cast<int64_t>(INT32_MIN) - 1) == INT32_MIN);
+    CHECK(hid::clamp24(0) == 0);
+    return 0;
+}
+
 int main() {
+    failures += test_fixed_point();
+    if (!failures) printf("fixed_point: OK\n");
     failures += test_single_thread();
     if (!failures) printf("single_thread: OK\n");
     failures += test_no_drop_policy();
