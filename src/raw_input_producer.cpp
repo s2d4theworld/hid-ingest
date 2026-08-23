@@ -128,6 +128,18 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
     if (m.lLastX == 0 && m.lLastY == 0 && !button_event)
         return;   // nothing reportable in this packet
 
+    // Mirror button HELD STATE from the RI transition flags. Raw Input
+    // reports DOWN/UP transitions per packet, but the HidSample contract is
+    // held-state bits (matching the Linux evdev producer): a consumer reading
+    // bit0 as "left is down" must be right on every sample, not just on the
+    // transition packet.
+    if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)   button_mirror_ |= 0x01;
+    if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)     button_mirror_ &= static_cast<uint16_t>(~0x01);
+    if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)  button_mirror_ |= 0x02;
+    if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)    button_mirror_ &= static_cast<uint16_t>(~0x02);
+    if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) button_mirror_ |= 0x04;
+    if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   button_mirror_ &= static_cast<uint16_t>(~0x04);
+
     HidSample sample{};
     if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
         constexpr int64_t kAbsMax = 65535;
@@ -140,11 +152,9 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
         sample.dx = m.lLastX << 8;
         sample.dy = m.lLastY << 8;
     }
-    // Mask to the documented contract: bits 0..3 (L/R/M down+up) plus the
-    // bit-15 absolute flag set above. RI_MOUSE_WHEEL and BUTTON_4/5 RI flags
-    // are deliberately not forwarded — wheel packets without movement are
-    // already filtered out at the top of this function.
-    sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0x000F);
+    // Push the mirrored held state (bits 0..2), not the raw transition
+    // flags. Bit 15 absolute flag was set above.
+    sample.buttons |= button_mirror_;
 
     // Timestamp basis: raw QPC truncated to 32 bits (~71 min wrap on typical
     // 10 MHz counters). Valid for per-platform DELTAS only, not absolute
@@ -172,14 +182,24 @@ void RawInputProducer::run() {
     wc.lpfnWndProc   = &RawInputProducer::wnd_proc;
     wc.hInstance     = GetModuleHandleW(nullptr);
     wc.lpszClassName = class_name;
-    RegisterClassExW(&wc);
+    if (RegisterClassExW(&wc) == 0) { running_.store(false); return; }
 
     hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
                             HWND_MESSAGE, nullptr, wc.hInstance,
                             this);  // lpParam -> WM_NCCREATE -> GWLP_USERDATA
-    if (!hwnd_) { running_.store(false); return; }
+    if (!hwnd_) {
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);  // no class-name leak
+        running_.store(false);
+        return;
+    }
 
-    if (!register_raw_input(hwnd_)) { running_.store(false); return; }
+    if (!register_raw_input(hwnd_)) {
+        DestroyWindow(hwnd_);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        hwnd_ = nullptr;
+        running_.store(false);
+        return;
+    }
 
     running_.store(true, std::memory_order_release);
 

@@ -13,8 +13,10 @@ struct HidSample {
     int32_t  dx;          // Relative X or absolute sub-pixel coordinate (Fixed-point 24.8)
     int32_t  dy;          // Relative Y or absolute sub-pixel coordinate (Fixed-point 24.8)
     uint16_t pressure;    // Normalized pressure (0-65535; 0 for standard mice)
-    uint16_t buttons;     // Bits 0..4: mouse buttons (L,R,M). Bit 15 (0x8000):
-                          // absolute coordinates flag (Win32 MOUSE_MOVE_ABSOLUTE path).
+    uint16_t buttons;     // Bits 0..2: L/R/M button HELD STATE (1 = currently
+                          // down; consistent across platforms). Bit 15
+                          // (0x8000): absolute coordinates flag (Win32
+                          // MOUSE_MOVE_ABSOLUTE path).
     uint32_t timestamp;   // PER-PLATFORM basis, deltas only — NOT comparable
                           // across producers: Win32 = raw QPC ticks (32-bit
                           // truncation, ~100 ns @ 10 MHz, wraps ~71 min);

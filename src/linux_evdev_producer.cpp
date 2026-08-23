@@ -38,7 +38,12 @@ public:
 
     /// Returns true only if the producer thread is up AND at least one device
     /// was captured. A false return means the caller should not expect data.
+    /// Calling start() on an already-live producer returns false — move-
+    /// assigning a joinable std::thread would call std::terminate().
     bool start() {
+        if (running_.load(std::memory_order_acquire))
+            return false;  // already live
+
         try { thread_ = std::thread([this] { run(); }); }
         catch (...) { return false; }
         // Wait briefly for run(): it sets running_ after discovery.
@@ -109,7 +114,10 @@ bool EvdevProducer::discover_devices() {
     struct udev* udev = udev_new();
     if (!udev) {
         // Full teardown: wake fd was already created above.
-        close(wake_fd_); wake_fd_ = -1;
+        // (stop() may race here while start() is still waiting for running_;
+        // it only touches wake_fd_ after checking != -1, so mirror that by
+        // keeping the reset atomic with the close from this thread's view.)
+        if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
         close(epoll_fd_); epoll_fd_ = -1;
         return false;
     }

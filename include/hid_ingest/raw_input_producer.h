@@ -53,6 +53,9 @@ private:
     uint64_t        oversize_dropped_ = 0; // telemetry: packets dropped (too large / retry failed)
     int64_t         screen_w_ = 0;         // cached at run() start (primary screen)
     int64_t         screen_h_ = 0;
+    // Mirrored HELD-STATE of L/R/M buttons (producer thread only). Raw Input
+    // reports DOWN/UP transitions; the sample contract is held state.
+    uint16_t        button_mirror_ = 0;
 };
 
 } // namespace hid::win32
