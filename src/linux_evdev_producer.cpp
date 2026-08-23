@@ -18,6 +18,7 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <thread>
+#include <queue>
 #include <chrono>
 #include <vector>
 
@@ -83,6 +84,7 @@ private:
         // button-only SYN frames reuse it instead of emitting (0,0).
         int32_t last_x = 0;
         int32_t last_y = 0;
+        uint16_t last_pressure = 0;   // mirrored through sync-loss too
         // Per-device button state: a shared field was wrong — a tablet press
         // would clear the mouse's held button.
         uint16_t buttons = 0;
@@ -90,7 +92,7 @@ private:
 
     void run();
     bool discover_devices();
-    void handle_sync_loss(CapturedDevice* captured);
+    void handle_sync_loss(CapturedDevice* captured, bool* has_pending, input_event* pending);
 
     SpscRing<>& ring_;
     EvdevProducerConfig cfg_;
@@ -180,7 +182,14 @@ bool EvdevProducer::discover_devices() {
 /// state during SYNC reads; our mirror must too, or a press that happened
 /// inside the gap would be missing from the sample stream until the next
 /// physical transition.
-void EvdevProducer::handle_sync_loss(CapturedDevice* captured) {
+///
+/// When rc == SUCCESS the event just read is a NORMAL event that was
+/// fetched as part of draining — it is stored in *pending and must be
+/// processed by the caller through the normal path (return true).
+///
+/// Known gap (documented): REL deltas inside the dropped-events window are
+/// discarded by libevdev's resync itself; they cannot be recovered.
+void EvdevProducer::handle_sync_loss(CapturedDevice* captured, bool* has_pending, input_event* pending) {
     input_event ev;
     int rc;
     do {
@@ -202,6 +211,16 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured) {
                     captured->last_y = static_cast<int32_t>(
                         v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
                 }
+                if (ev.code == ABS_PRESSURE) {
+                    // Mirror pressure too: a stale value here would leak into
+                    // the next pressure-only sample after resync.
+                    const int64_t max_p =
+                        libevdev_get_abs_maximum(captured->dev, ABS_PRESSURE) ?: 1023;
+                    const int64_t v = ev.value < 0 ? 0
+                                    : (ev.value > max_p ? max_p : ev.value);
+                    captured->last_pressure =
+                        static_cast<uint16_t>(v * 65535 / max_p);
+                }
                 break;
             case EV_KEY:
                 if (ev.code == BTN_LEFT)
@@ -216,10 +235,15 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured) {
                 break;
             default: break;
         }
+        if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
+            // Sync queue drained; this event is REAL NORMAL data. Hand it
+            // back to the caller instead of swallowing it.
+            *pending = ev;
+            *has_pending = true;
+        }
     } while (rc == LIBEVDEV_READ_STATUS_SYNC);
-    // Loop exits on SUCCESS (sync queue drained — the next event would be
-    // NORMAL data, which must go through the normal path) or on any error
-    // (typically -EAGAIN when both queues are empty).
+    // Loop exits on SUCCESS (after handing back the first normal event) or
+    // on any error (typically -EAGAIN when both queues are empty).
 }
 
 void EvdevProducer::run() {
@@ -272,9 +296,19 @@ void EvdevProducer::run() {
             bool has_button_change = false;   // press OR release this packet
             bool has_pressure = false;        // pressure arrived this packet
             int rc;
+            std::queue<input_event> process_pending;  // normal events handed
+                                                      // back by sync-loss
 
-            while ((rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL, &ev))
-                   == LIBEVDEV_READ_STATUS_SUCCESS) {
+            while (true) {
+                if (!process_pending.empty()) {
+                    // A sync drain handed back a real normal event — run it
+                    // through this same state machine.
+                    ev = process_pending.front();
+                    process_pending.pop();
+                } else {
+                    rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL, &ev);
+                    if (rc != LIBEVDEV_READ_STATUS_SUCCESS) break;
+                }
                 switch (ev.type) {
                     case EV_REL:
                         // Relative counts are integer pixels -> convert to
@@ -320,6 +354,7 @@ void EvdevProducer::run() {
                                         : (ev.value > max_p ? max_p : ev.value);
                             acc.pressure =
                                 static_cast<uint16_t>(v * 65535 / max_p);
+                            captured->last_pressure = acc.pressure;   // mirror
                             has_pressure = true;   // pressure-only samples are reportable
                         }
                         break;
@@ -360,6 +395,9 @@ void EvdevProducer::run() {
                             if (!has_motion && captured) {
                                 acc.dx = captured->last_x;
                                 acc.dy = captured->last_y;
+                                // Pressure-only frames reuse the mirrored
+                                // pressure too, instead of emitting 0.
+                                acc.pressure = captured->last_pressure;
                             }
                             acc.buttons = captured ? captured->buttons : 0;
                             ring_.push(acc);
@@ -372,7 +410,16 @@ void EvdevProducer::run() {
                     default: break;
                 }
             }
-            if (rc == LIBEVDEV_READ_STATUS_SYNC) handle_sync_loss(captured);
+            if (rc == LIBEVDEV_READ_STATUS_SYNC) {
+                // Resync; a SUCCESS inside the drain means one REAL normal
+                // event was fetched. Queue it so the loop above processes it
+                // through the same state machine instead of swallowing it.
+                bool has_pending = false;
+                input_event pending{};
+                handle_sync_loss(captured, &has_pending, &pending);
+                if (has_pending)
+                    process_pending.push(pending);
+            }
             if (rc == -ENODEV) {
                 // Device removed.
                 for (size_t d = 0; d < devices_.size(); ++d) {
