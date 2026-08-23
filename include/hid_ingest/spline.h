@@ -129,7 +129,10 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
         for (size_t j = i + 1; j + 1 < count && written < out_cap; ++j) {
             Vec2 pt = { FromFixed24_8(samples[j].dx), FromFixed24_8(samples[j].dy) };
             const float len = std::sqrt(dist_sq(prev_pt, pt));
-            int steps = static_cast<int>(len / step_px);
+            // +1 matches the Catmull-Rom loop: even short segments advance at
+            // least one sub-step so the tail never visually jumps a whole
+            // sample gap.
+            int steps = static_cast<int>(len / step_px) + 1;
             for (int s = 1; s <= steps && written < out_cap; ++s) {
                 const float t = static_cast<float>(s) / steps;
                 emit({ prev_pt.x + (pt.x - prev_pt.x) * t,

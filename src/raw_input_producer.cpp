@@ -37,13 +37,11 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                                          sizeof(RAWINPUTHEADER));
 
             if (bytes == static_cast<UINT>(-1)) {
-                // Either the packet needs >kStackCap (retry on heap, capped at
-                // kHeapCap) or it exceeds even kHeapCap — in which case it is
-                // deliberately dropped (only mice are parsed; such sizes come
-                // from exotic digitizer collections) and counted so the drop
-                // is visible in telemetry.
-                ++self->oversize_dropped_;
-                if (size > kStackCap && size <= kHeapCap) {
+                // Packet exceeded the stack buffer. Retry on heap when the
+                // required size fits kHeapCap; count as dropped only if the
+                // retry is impossible (too large / OOM) or fails.
+                const bool retryable = size > kStackCap && size <= kHeapCap;
+                if (retryable) {
                     BYTE* heap_buf = static_cast<BYTE*>(malloc(size));
                     if (heap_buf) {
                         UINT heap_size = size;
@@ -55,15 +53,24 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                             auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
                             if (raw->header.dwType == RIM_TYPEMOUSE)
                                 self->emit_mouse_sample(raw->data.mouse);
+                        } else {
+                            ++self->oversize_dropped_;  // retry failed
                         }
                         free(heap_buf);
+                    } else {
+                        ++self->oversize_dropped_;      // OOM
                     }
+                } else {
+                    // Deliberately dropped: >4 KB comes from exotic digitizer
+                    // collections; only mice are parsed anyway. Counted so the
+                    // drop stays visible in telemetry.
+                    ++self->oversize_dropped_;
                 }
                 // CRITICAL: forward so the system cleans up the handle.
                 return DefWindowProcW(hwnd, WM_INPUT, wparam, lparam);
             }
 
-            if (bytes != static_cast<UINT>(-1)) {
+            {
                 auto* raw = reinterpret_cast<RAWINPUT*>(raw_buffer);
                 if (raw->header.dwType == RIM_TYPEMOUSE) {
                     self->emit_mouse_sample(raw->data.mouse);
@@ -74,7 +81,9 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
         }
         case WM_INPUT_DEVICE_CHANGE:
             // GIDC_ARRIVAL / GIDC_REMOVAL — devices are registered usage-wide,
-            // so arrival needs no action; removal is handled by Raw Input itself.
+            // so arrival needs no action; removal is handled by Raw Input
+            // itself. Deliberately swallowed (no DefWindowProc): there is no
+            // default processing for GIDC_* notifications.
             return 0;
         case WM_DESTROY:
             PostQuitMessage(0);

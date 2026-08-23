@@ -49,7 +49,7 @@ private:
     std::jthread    thread_;
     std::atomic<bool> running_{false};
     HWND            hwnd_ = nullptr;
-    DWORD           thread_id_ = 0;
+    DWORD           thread_id_ = 0;   // unused; kept for future diagnostics
     uint64_t        oversize_count_ = 0;   // telemetry: complex packets parsed via heap retry
     uint64_t        oversize_dropped_ = 0; // telemetry: packets dropped (too large / retry failed)
     int64_t         screen_w_ = 0;         // cached at run() start (primary screen)

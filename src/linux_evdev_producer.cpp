@@ -12,6 +12,7 @@
 #include <libudev.h>
 #include <poll.h>
 #include <sys/eventfd.h>
+#include <cstdint>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/epoll.h>
@@ -89,7 +90,11 @@ bool EvdevProducer::discover_devices() {
     epoll_event wake_ev{};
     wake_ev.events = EPOLLIN;
     wake_ev.data.fd = wake_fd_;
-    epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &wake_ev);
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &wake_ev) < 0) {
+        close(wake_fd_); wake_fd_ = -1;
+        close(epoll_fd_); epoll_fd_ = -1;
+        return false;
+    }
 
     struct udev* udev = udev_new();
     if (!udev) {
@@ -130,7 +135,13 @@ bool EvdevProducer::discover_devices() {
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLET;      // edge-triggered
         ev.data.fd = fd;
-        epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
+            fprintf(stderr, "[producer] epoll_ctl add failed for %s\n", devnode);
+            libevdev_free(evdev);
+            close(fd);
+            udev_device_unref(dev);
+            continue;
+        }
         devices_.push_back({fd, evdev});
         udev_device_unref(dev);
     }
@@ -150,7 +161,9 @@ void EvdevProducer::handle_sync_loss(struct libevdev* dev) {
 void EvdevProducer::run() {
     sched_param sp{};
     sp.sched_priority = cfg_.fifo_priority;
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0)
+        // Common without root/CAP_SYS_NICE; latency targets may not hold.
+        fprintf(stderr, "[producer] SCHED_FIFO not granted (no privilege?)\n");
 
     if (cfg_.core >= 0) {
         cpu_set_t set;
@@ -192,6 +205,7 @@ void EvdevProducer::run() {
             HidSample acc{};
             bool has_motion = false;
             bool has_button_change = false;   // press OR release this packet
+            bool has_pressure = false;        // pressure arrived this packet
             int rc;
 
             while ((rc = libevdev_next_event(dev, LIBEVDEV_READ_FLAG_NORMAL, &ev))
@@ -202,10 +216,22 @@ void EvdevProducer::run() {
                         if (ev.code == REL_Y) { acc.dy += ev.value; has_motion = true; }
                         break;
                     case EV_ABS:
-                        // int64 before shift: high-res tablets can exceed the
-                        // 24.8 range of a raw int32 << 8.
-                        if (ev.code == ABS_X) { acc.dx = (int64_t)ev.value << 8; has_motion = true; }
-                        if (ev.code == ABS_Y) { acc.dy = (int64_t)ev.value << 8; has_motion = true; }
+                        // Clamp to int32 range BEFORE narrowing: the int64
+                        // shift alone does not prevent truncation on assign
+                        // to acc.dx (int32_t). Coordinates beyond ~8.3M after
+                        // <<8 are out of spec for a 24.8 field.
+                        if (ev.code == ABS_X) {
+                            const int64_t v = static_cast<int64_t>(ev.value) << 8;
+                            acc.dx = static_cast<int32_t>(
+                                v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                            has_motion = true;
+                        }
+                        if (ev.code == ABS_Y) {
+                            const int64_t v = static_cast<int64_t>(ev.value) << 8;
+                            acc.dy = static_cast<int32_t>(
+                                v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                            has_motion = true;
+                        }
                         if (ev.code == ABS_PRESSURE) {
                             // Clamp: some devices report negative/odd values;
                             // pressure must stay in [0, max] before scaling.
@@ -215,6 +241,7 @@ void EvdevProducer::run() {
                                         : (ev.value > max_p ? max_p : ev.value);
                             acc.pressure =
                                 static_cast<uint16_t>(v * 65535 / max_p);
+                            has_pressure = true;   // pressure-only samples are reportable
                         }
                         break;
                     case EV_KEY:
@@ -229,13 +256,18 @@ void EvdevProducer::run() {
                         if (ev.code == BTN_MIDDLE)
                             button_state_ = ev.value ? (button_state_ | 0x04)
                                                      : (button_state_ & static_cast<uint16_t>(~0x04));
-                        // Press and release are both reportable button events
-                        // (kept out of has_motion so motion filters stay honest).
-                        has_button_change = true;
+                        // Only tracked buttons (LEFT/RIGHT/MIDDLE) count as
+                        // reportable changes. BTN_TOOL_* (pen/finger
+                        // proximity) and untracked side buttons do not push a
+                        // sample by themselves.
+                        if (ev.code == BTN_LEFT || ev.code == BTN_RIGHT ||
+                            ev.code == BTN_MIDDLE)
+                            has_button_change = true;
                         break;
                     case EV_SYN:
                         if (ev.code == SYN_REPORT &&
-                            (has_motion || has_button_change || button_state_)) {
+                            (has_motion || has_button_change || has_pressure ||
+                             button_state_)) {
                             acc.timestamp = static_cast<uint32_t>(
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
                             acc.buttons = button_state_;   // always current state
@@ -243,6 +275,7 @@ void EvdevProducer::run() {
                             acc = {};
                             has_motion = false;
                             has_button_change = false;
+                            has_pressure = false;
                         }
                         break;
                     default: break;
