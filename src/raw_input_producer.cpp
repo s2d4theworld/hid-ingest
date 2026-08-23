@@ -317,14 +317,12 @@ void RawInputProducer::stop() {
     hwnd_ = nullptr;
 }
 
-// NOTE on cross-thread hwnd_ access: run() writes hwnd_, stop()/start()
-// read and reset it from other threads. This is technically a data race on
-// a plain HWND; it is deliberately tolerated because (a) pointer-sized
-// stores cannot tear on the target platforms, (b) every cross-thread read
-// is gated behind thread_exited_ acquire or join(), which establish
-// happens-before with run()'s final write, and (c) making it atomic<HWND>
-// would complicate every use site for no practical gain. If TSAN flags it,
-// switch to std::atomic<HWND> — the change is mechanical.
+// NOTE on cross-thread hwnd_ access: hwnd_ is std::atomic<HWND> (relaxed
+// ordering) because stop() may read it via PostMessageW BEFORE join — that
+// pre-join read cannot be gated behind thread_exited_/join happens-before.
+// Atomicity removes the data race; relaxed is sufficient since the value is
+// a self-consistent handle and the window's actual lifetime is ordered by
+// the running_/stop_requested_ protocol.
 
 
 } // namespace hid::win32

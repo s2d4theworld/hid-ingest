@@ -127,8 +127,8 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
         // For the FINAL window (no next window), the last CR segment is
         // pts[n-3]->pts[n-2], so advance only past that — samples[i+n-2]
         // and samples[i+n-1] fall through to the remainder pass, which
-        // renders their connecting segment explicitly.
-        if (count - i > n) i += n - 3; else i += n - 1;
+        // renders their connecting segment explicitly with sub-steps.
+        if (count - i > n) i += n - 3; else i += n - 2;
     }
 
     // Remainder: unprocessed points remain after the last spline window

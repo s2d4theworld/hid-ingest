@@ -63,7 +63,10 @@ private:
     // the flag during a stop()-during-setup race (same pattern as the evdev
     // producer's stop_requested_).
     std::atomic<bool> stop_requested_{false};
-    HWND            hwnd_ = nullptr;
+    // Cross-thread HWND: written by run() (producer thread) on creation and
+    // reset-to-null on exit; read by stop() (PostMessageW) possibly BEFORE
+    // join — that pre-join read cannot be gated, so the field is atomic.
+    std::atomic<HWND> hwnd_{nullptr};
     // Telemetry: atomics because they are written on the producer thread and
     // may be read cross-thread via the getters (relaxed is sufficient for
     // approximate counters; see spsc_ring drop_counter_ precedent).

@@ -151,11 +151,12 @@ private:
     std::thread thread_;
     // Set true by the run() lambda right before it returns; lets start()'s
     // reap branch distinguish "thread finished" (safe to join + reap fds)
-    // from "thread still live" (must not join — would hang).
-    std::atomic<bool> thread_exited_{true};
+    // from "thread still live" (must not join — would hang). Initialized
+    // false: no thread has run yet.
+    std::atomic<bool> thread_exited_{false};
     std::atomic<bool> running_{false};
-    // Only ever written by stop(). Separate from running_ because run()
-    // stores true into running_ after discovery and would otherwise
+    // Only ever written by stop()/start(). Separate from running_ because
+    // run() stores true into running_ after discovery and would otherwise
     // resurrect the flag during a stop()-during-discovery race.
     std::atomic<bool> stop_requested_{false};
     int epoll_fd_ = -1;
