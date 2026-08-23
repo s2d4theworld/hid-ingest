@@ -197,6 +197,14 @@ bool EvdevProducer::discover_devices() {
         return false;
     }
     struct udev_enumerate* enumerate = udev_enumerate_new(udev);
+    if (!enumerate) {
+        // OOM edge: unref the udev handle and tear down fds — same cleanup
+        // contract as the other failure paths above.
+        if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
+        close(epoll_fd_); epoll_fd_ = -1;
+        udev_unref(udev);
+        return false;
+    }
     udev_enumerate_add_match_subsystem(enumerate, "input");
     udev_enumerate_scan_devices(enumerate);
     struct udev_list_entry* entries = udev_enumerate_get_list_entry(enumerate);

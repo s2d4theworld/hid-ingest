@@ -234,9 +234,17 @@ void RawInputProducer::run() {
         BOOL quit = PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
         if (quit) { running_.store(false, std::memory_order_relaxed); break; }
 
-        while (PeekMessageW(&msg, hwnd_, 0, 0, PM_REMOVE)) {
+        // Drain pending messages. Under a sustained WM_INPUT flood this
+        // inner loop could starve the outer shutdown check, so re-check the
+        // flags every 64 dispatched messages — shutdown latency stays
+        // bounded even during input storms.
+        int drained = 0;
+        while (running_.load(std::memory_order_relaxed) &&
+               !stop_requested_.load(std::memory_order_relaxed) &&
+               PeekMessageW(&msg, hwnd_, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            if (++drained % 64 == 0) break;   // yield to the outer checks
         }
     }
     // hwnd_ ownership note: written only on this (producer) thread and read
@@ -284,13 +292,17 @@ bool RawInputProducer::start() {
         return false;
     }
 
-    // Wait briefly for the message loop to come up. If stop() raced us, do
-    // NOT join here — stop() (another thread) may be joining the same
-    // std::jthread concurrently, which is a data race; leave the joinable
-    // thread to stop() and report failure honestly.
+    // Wait briefly for the message loop to come up. Exit the loop early when
+    // (a) running_ observed (success), (b) stop() raced, or (c) the thread
+    // already exited on its own (fast setup failure — no reason to burn the
+    // remaining ~1 s of wait). If stop() raced, do NOT join here — stop()
+    // (another thread) may be joining the same std::jthread concurrently,
+    // which is a data race; leave the joinable thread to stop() and report
+    // failure honestly.
     for (int i = 0;
          i < 100 && !running_.load(std::memory_order_acquire) &&
-         !stop_requested_.load(std::memory_order_acquire);
+         !stop_requested_.load(std::memory_order_acquire) &&
+         !thread_exited_.load(std::memory_order_acquire);
          ++i)
         Sleep(10);
 
@@ -299,6 +311,12 @@ bool RawInputProducer::start() {
         // (its write happens-before our read via thread_exited_/stop
         // synchronization). Do NOT touch hwnd_ here — a concurrent writer
         // would be an unsynchronized data race.
+        return false;
+    }
+    if (!running_.load(std::memory_order_acquire) &&
+        thread_exited_.load(std::memory_order_acquire)) {
+        // Fast setup failure: reap the dead thread so a retry can proceed.
+        thread_.join();
         return false;
     }
     return running_.load(std::memory_order_acquire);
