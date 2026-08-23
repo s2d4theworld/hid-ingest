@@ -16,6 +16,7 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <thread>
+#include <chrono>
 #include <vector>
 
 #include "hid_ingest/spsc_ring.h"
@@ -33,10 +34,15 @@ public:
         : ring_(ring), cfg_(cfg) {}
     ~EvdevProducer() { stop(); }
 
+    /// Returns true only if the producer thread is up AND at least one device
+    /// was captured. A false return means the caller should not expect data.
     bool start() {
         try { thread_ = std::thread([this] { run(); }); }
         catch (...) { return false; }
-        return true;
+        // Wait briefly for run(): it sets running_ after discovery.
+        for (int i = 0; i < 100 && !running_.load(std::memory_order_acquire); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return running_.load(std::memory_order_acquire);
     }
     void stop() {
         running_.store(false);
@@ -48,11 +54,17 @@ private:
     bool discover_devices();
     void handle_sync_loss(struct libevdev* dev);
 
+    struct CapturedDevice {
+        int fd;
+        struct libevdev* dev;
+    };
+
     SpscRing<>& ring_;
     EvdevProducerConfig cfg_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     int epoll_fd_ = -1;
+    std::vector<CapturedDevice> devices_;
     // Persistent button state: survives EV_SYN resets of the per-sample
     // accumulator, so mid-drag samples report the held buttons.
     uint16_t button_state_ = 0;
@@ -153,8 +165,10 @@ void EvdevProducer::run() {
                         if (ev.code == REL_Y) { acc.dy += ev.value; has_motion = true; }
                         break;
                     case EV_ABS:
-                        if (ev.code == ABS_X) { acc.dx = ev.value << 8; has_motion = true; }  // -> 24.8
-                        if (ev.code == ABS_Y) { acc.dy = ev.value << 8; has_motion = true; }
+                        // int64 before shift: high-res tablets can exceed the
+                        // 24.8 range of a raw int32 << 8.
+                        if (ev.code == ABS_X) { acc.dx = (int64_t)ev.value << 8; has_motion = true; }
+                        if (ev.code == ABS_Y) { acc.dy = (int64_t)ev.value << 8; has_motion = true; }
                         if (ev.code == ABS_PRESSURE)
                             acc.pressure = static_cast<uint16_t>(
                                 ev.value * 65535 /
@@ -172,8 +186,9 @@ void EvdevProducer::run() {
                         if (ev.code == BTN_MIDDLE)
                             button_state_ = ev.value ? (button_state_ | 0x04)
                                                      : (button_state_ & static_cast<uint16_t>(~0x04));
-                        if (ev.value) has_motion = true;  // press is a reportable event
-                        else has_button_change = true;    // release too (unstuck drag)
+                        // Press and release are both reportable button events
+                        // (kept out of has_motion so motion filters stay honest).
+                        has_button_change = true;
                         break;
                     case EV_SYN:
                         if (ev.code == SYN_REPORT &&
