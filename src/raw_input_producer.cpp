@@ -126,7 +126,9 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
                            RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP |
                            RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_UP);
     if (m.lLastX == 0 && m.lLastY == 0 && !button_event)
-        return;   // nothing reportable in this packet
+        return;   // nothing reportable: wheel-only packets are deliberately
+                  // out of scope (HidSample has no wheel field) — documented
+                  // in hid_sample.h
 
     // Mirror button HELD STATE from the RI transition flags. Raw Input
     // reports DOWN/UP transitions per packet, but the HidSample contract is

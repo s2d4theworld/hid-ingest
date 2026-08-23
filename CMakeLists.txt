@@ -52,4 +52,11 @@ endif()
 if(WIN32)
     add_executable(console_demo examples/console_demo.cpp)
     target_link_libraries(console_demo PRIVATE hid_ingest_win32)
+elseif(UNIX AND NOT APPLE)
+    # Linux parity demo: #includes the producer .cpp directly (the class has
+    # no dedicated header), so it is built standalone instead of linking
+    # hid_ingest_linux. Needs pkg-config deps same as the library.
+    add_executable(evdev_demo examples/evdev_demo.cpp)
+    target_include_directories(evdev_demo SYSTEM PRIVATE ${EVDEV_INCLUDE_DIRS} ${UDEV_INCLUDE_DIRS})
+    target_link_libraries(evdev_demo PRIVATE hid_ingest_core pthread ${EVDEV_LIBRARIES} ${UDEV_LIBRARIES})
 endif()

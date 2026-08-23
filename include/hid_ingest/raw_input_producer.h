@@ -38,6 +38,12 @@ public:
 
     bool running() const noexcept { return running_.load(std::memory_order_relaxed); }
 
+    // Telemetry: complex packets parsed via heap retry / dropped as too
+    // large. Both producer-thread-written; read before stop() for a stable
+    // snapshot.
+    uint64_t oversize_count() const noexcept { return oversize_count_; }
+    uint64_t oversize_dropped() const noexcept { return oversize_dropped_; }
+
 private:
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
     void run();

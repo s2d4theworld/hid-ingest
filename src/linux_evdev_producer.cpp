@@ -261,11 +261,11 @@ void EvdevProducer::run() {
     }
 
     if (!discover_devices()) {
-        // Early-out with full fd cleanup: discover_devices() may have created
-        // epoll/wake fds before failing to capture any device.
+        // No devices captured. Do NOT close wake_fd_/epoll_fd_ here: stop()
+        // may be blocked writing the wake fd right now (its check/write pair
+        // races any close on this thread). Ownership stays with this thread
+        // until stop()'s join, then stop() performs the final teardown.
         fprintf(stderr, "[producer] no HID devices found\n");
-        if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
-        if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
         return;
     }
     running_.store(true);
@@ -447,11 +447,9 @@ void EvdevProducer::run() {
         close(d.fd);
     }
     devices_.clear();
-    // NOTE: wake_fd_/epoll_fd_ are intentionally NOT closed here. stop()
-    // writes to wake_fd_ to break epoll_wait; closing it in this thread
-    // races with stop()'s check/write pair (the descriptor could be reused
-    // between the two). Ownership stays with this thread only until join();
-    // stop() performs the final teardown afterwards.
+    // NOTE: wake_fd_/epoll_fd_ are intentionally NOT closed here (same
+    // reasoning as the no-devices early-out above). stop() performs the
+    // final teardown after join().
 }
 
 } // namespace hid::evdev

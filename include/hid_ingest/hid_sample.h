@@ -22,6 +22,8 @@ struct HidSample {
                           // truncation, ~100 ns @ 10 MHz, wraps ~71 min);
                           // Linux = kernel event time in wall-clock us.
                           // Consumers must compute deltas within one producer.
+    // SCOPE: motion + buttons + (Linux) pressure only. Mouse wheel input is
+    // deliberately not captured — there is no wheel field in this struct.
 };
 #pragma pack(pop)
 
