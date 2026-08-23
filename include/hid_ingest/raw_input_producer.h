@@ -51,6 +51,8 @@ private:
     HWND            hwnd_ = nullptr;
     DWORD           thread_id_ = 0;
     uint64_t        oversize_count_ = 0;   // telemetry: packets needing heap retry
+    int64_t         screen_w_ = 0;         // cached at run() start (primary screen)
+    int64_t         screen_h_ = 0;
 };
 
 } // namespace hid::win32

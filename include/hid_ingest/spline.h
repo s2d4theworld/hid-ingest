@@ -120,6 +120,25 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
         i += n - 3;  // overlap by 3 to keep continuity windows
     }
 
+    // Remainder: fewer than 4 unprocessed points remain between the last
+    // spline window and the final point. Emit them as straight segments so
+    // interior samples are not dropped geometrically (the Catmull-Rom loop
+    // above needs a 4-point window).
+    if (i + 1 < count && written < out_cap) {
+        Vec2 prev_pt = { FromFixed24_8(samples[i].dx), FromFixed24_8(samples[i].dy) };
+        for (size_t j = i + 1; j + 1 < count && written < out_cap; ++j) {
+            Vec2 pt = { FromFixed24_8(samples[j].dx), FromFixed24_8(samples[j].dy) };
+            const float len = std::sqrt(dist_sq(prev_pt, pt));
+            int steps = static_cast<int>(len / step_px);
+            for (int s = 1; s <= steps && written < out_cap; ++s) {
+                const float t = static_cast<float>(s) / steps;
+                emit({ prev_pt.x + (pt.x - prev_pt.x) * t,
+                       prev_pt.y + (pt.y - prev_pt.y) * t });
+            }
+            prev_pt = pt;
+        }
+    }
+
     // Tail: emit last raw point so the path always ends at true input.
     if (written < out_cap)
         emit({ FromFixed24_8(samples[count - 1].dx), FromFixed24_8(samples[count - 1].dy) });

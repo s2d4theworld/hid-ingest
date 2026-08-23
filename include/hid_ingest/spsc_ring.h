@@ -55,7 +55,8 @@ public:
             tail = tail_.load(std::memory_order_acquire);
             if (head - tail == Capacity) {          // genuinely full
                 if constexpr (DropOnOverflow) {
-                    ++drop_counter_;                // drop NEWEST (see header note)
+                    // drop NEWEST (see header note)
+                    drop_counter_.fetch_add(1, std::memory_order_relaxed);
                 }
                 return false;
             }
@@ -95,7 +96,9 @@ public:
         const size_t t = tail_.load(std::memory_order_acquire);
         return h > t ? (h - t) : 0;
     }
-    uint64_t dropped_approx() const noexcept { return drop_counter_; }
+    uint64_t dropped_approx() const noexcept {
+        return drop_counter_.load(std::memory_order_relaxed);
+    }
     static constexpr size_t capacity() noexcept { return Capacity; }
 
 private:
@@ -104,7 +107,10 @@ private:
     // Producer-owned cache line.
     alignas(64) std::atomic<size_t> head_{0};
     size_t tail_cached_ = 0;
-    uint64_t drop_counter_ = 0;
+    // Atomic: read cross-thread via dropped_approx(); producer writes with
+    // relaxed stores — counter is telemetry, exact snapshot not required,
+    // but the standard forbids unsynchronized concurrent access.
+    std::atomic<uint64_t> drop_counter_{0};
 
     // Consumer-owned cache line.
     alignas(64) std::atomic<size_t> tail_{0};

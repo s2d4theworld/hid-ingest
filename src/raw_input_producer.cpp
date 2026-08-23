@@ -41,8 +41,8 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                     bytes = GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam),
                                             RID_INPUT, heap_buf, &heap_size,
                                             sizeof(RAWINPUTHEADER));
-                    ++self->oversize_count_;   // telemetry: complex device present
                     if (bytes != static_cast<UINT>(-1)) {
+                        ++self->oversize_count_;  // telemetry: complex device present
                         auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
                         if (raw->header.dwType == RIM_TYPEMOUSE)
                             self->emit_mouse_sample(raw->data.mouse);
@@ -112,12 +112,10 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
     HidSample sample{};
     if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
         constexpr int64_t kAbsMax = 65535;
-        const int64_t scr_w = GetSystemMetrics(SM_CXSCREEN);
-        const int64_t scr_h = GetSystemMetrics(SM_CYSCREEN);
         sample.dx = static_cast<int32_t>(
-            static_cast<int64_t>(m.lLastX) * scr_w / kAbsMax) << 8;
+            static_cast<int64_t>(m.lLastX) * screen_w_ / kAbsMax) << 8;
         sample.dy = static_cast<int32_t>(
-            static_cast<int64_t>(m.lLastY) * scr_h / kAbsMax) << 8;
+            static_cast<int64_t>(m.lLastY) * screen_h_ / kAbsMax) << 8;
         sample.buttons |= 0x8000;  // absolute-coordinate flag
     } else {
         sample.dx = m.lLastX << 8;
@@ -136,6 +134,11 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
 }
 
 void RawInputProducer::run() {
+    // Cache once: absolute-mode scaling uses these per packet. Documented
+    // limitation: primary screen only, no DPI/monitor-change tracking.
+    screen_w_ = GetSystemMetrics(SM_CXSCREEN);
+    screen_h_ = GetSystemMetrics(SM_CYSCREEN);
+
     WNDCLASSEXW wc{};
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = &RawInputProducer::wnd_proc;
