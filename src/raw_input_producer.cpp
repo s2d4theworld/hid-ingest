@@ -145,10 +145,11 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
     HidSample sample{};
     if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
         constexpr int64_t kAbsMax = 65535;
-        // Scale in int64, shift in int64, then clamp once — precedence of
-        // `<<` over the int32 cast would otherwise narrow BEFORE the shift.
-        const int64_t dx = (static_cast<int64_t>(m.lLastX) * screen_w_ / kAbsMax) << 8;
-        const int64_t dy = (static_cast<int64_t>(m.lLastY) * screen_h_ / kAbsMax) << 8;
+        // Sub-pixel precision: multiply and SHIFT in int64 FIRST, divide
+        // LAST — dividing before the shift quantizes to whole pixels and
+        // throws away the sub-pixel bits the 24.8 format exists for.
+        const int64_t dx = (static_cast<int64_t>(m.lLastX) * screen_w_ << 8) / kAbsMax;
+        const int64_t dy = (static_cast<int64_t>(m.lLastY) * screen_h_ << 8) / kAbsMax;
         sample.dx = clamp24(dx);
         sample.dy = clamp24(dy);
         sample.buttons |= 0x8000;  // absolute-coordinate flag

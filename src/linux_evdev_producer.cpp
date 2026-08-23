@@ -159,8 +159,14 @@ private:
     // run() stores true into running_ after discovery and would otherwise
     // resurrect the flag during a stop()-during-discovery race.
     std::atomic<bool> stop_requested_{false};
-    int epoll_fd_ = -1;
-    int wake_fd_ = -1;   // eventfd: written by stop() to break epoll_wait
+    // Atomic: stop() (another thread) reads wake_fd_ to post the shutdown
+    // write possibly BEFORE join — that pre-join read cannot be gated behind
+    // thread_exited_/join happens-before, so plain ints would be a data
+    // race. Same precedent as Win32's atomic hwnd_. Relaxed is sufficient:
+    // the value is a self-consistent handle; the window lifetime is ordered
+    // by the running_/stop_requested_ protocol.
+    std::atomic<int> epoll_fd_{-1};
+    std::atomic<int> wake_fd_{-1};   // eventfd: written by stop() to break epoll_wait
     std::vector<CapturedDevice> devices_;
 };
 
