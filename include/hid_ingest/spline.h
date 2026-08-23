@@ -143,6 +143,10 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
     }
 
     // Tail: emit last raw point so the path always ends at true input.
+    // NOTE: if out_cap is exhausted before this point, remaining interior
+    // samples and the endpoint are silently dropped — callers size out_cap
+    // generously (see console_demo: 4096 verts for <=1024 samples); there is
+    // deliberately no truncation counter to keep this function stateless.
     if (written < out_cap)
         emit({ FromFixed24_8(samples[count - 1].dx), FromFixed24_8(samples[count - 1].dy) });
 

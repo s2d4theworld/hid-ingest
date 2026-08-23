@@ -1,5 +1,5 @@
 # Build artifacts
-build/
+build*/
 out/
 *.obj
 *.exe
@@ -14,6 +14,3 @@ out/
 # OS
 Thumbs.db
 .DS_Store
-
-# Linux build dir
-build-linux/

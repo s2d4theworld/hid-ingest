@@ -66,6 +66,10 @@ private:
     struct CapturedDevice {
         int fd;
         struct libevdev* dev;
+        // Last known absolute position (24.8), per device. Pressure-only or
+        // button-only SYN frames reuse it instead of emitting (0,0).
+        int32_t last_x = 0;
+        int32_t last_y = 0;
     };
 
     SpscRing<>& ring_;
@@ -199,7 +203,8 @@ void EvdevProducer::run() {
             }
 
             struct libevdev* dev = nullptr;
-            for (auto& d : devices_) if (d.fd == events[i].data.fd) dev = d.dev;
+            CapturedDevice* captured = nullptr;
+            for (auto& d : devices_) if (d.fd == events[i].data.fd) { dev = d.dev; captured = &d; }
             if (!dev) continue;
 
             HidSample acc{};
@@ -224,12 +229,14 @@ void EvdevProducer::run() {
                             const int64_t v = static_cast<int64_t>(ev.value) << 8;
                             acc.dx = static_cast<int32_t>(
                                 v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                            captured->last_x = acc.dx;   // remember per-device position
                             has_motion = true;
                         }
                         if (ev.code == ABS_Y) {
                             const int64_t v = static_cast<int64_t>(ev.value) << 8;
                             acc.dy = static_cast<int32_t>(
                                 v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                            captured->last_y = acc.dy;
                             has_motion = true;
                         }
                         if (ev.code == ABS_PRESSURE) {
@@ -270,6 +277,13 @@ void EvdevProducer::run() {
                              button_state_)) {
                             acc.timestamp = static_cast<uint32_t>(
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
+                            // Absolute devices that did not resend X/Y this
+                            // frame (pressure-only, button-only) reuse the
+                            // last known position instead of emitting (0,0).
+                            if (!has_motion && captured) {
+                                acc.dx = captured->last_x;
+                                acc.dy = captured->last_y;
+                            }
                             acc.buttons = button_state_;   // always current state
                             ring_.push(acc);
                             acc = {};
