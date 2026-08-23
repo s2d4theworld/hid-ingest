@@ -55,8 +55,11 @@ private:
     std::jthread    thread_;
     std::atomic<bool> running_{false};
     HWND            hwnd_ = nullptr;
-    uint64_t        oversize_count_ = 0;   // telemetry: complex packets parsed via heap retry
-    uint64_t        oversize_dropped_ = 0; // telemetry: packets dropped (too large / retry failed)
+    // Telemetry: atomics because they are written on the producer thread and
+    // may be read cross-thread via the getters (relaxed is sufficient for
+    // approximate counters; see spsc_ring drop_counter_ precedent).
+    std::atomic<uint64_t> oversize_count_{0};     // complex packets parsed via heap retry
+    std::atomic<uint64_t> oversize_dropped_{0};   // packets dropped (too large / retry failed)
     int64_t         screen_w_ = 0;         // cached at run() start (primary screen)
     int64_t         screen_h_ = 0;
     // Mirrored HELD-STATE of L/R/M buttons (producer thread only). Raw Input

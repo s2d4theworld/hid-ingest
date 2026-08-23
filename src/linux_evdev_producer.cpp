@@ -44,6 +44,7 @@ public:
     bool start() {
         if (running_.load(std::memory_order_acquire))
             return false;  // already live
+        stop_requested_.store(false, std::memory_order_release);
 
         // Reap a dead thread from a previous failed start (e.g. no devices /
         // discovery failure): it exited but stayed joinable. Move-assigning
@@ -53,12 +54,28 @@ public:
 
         try { thread_ = std::thread([this] { run(); }); }
         catch (...) { return false; }
-        // Wait briefly for run(): it sets running_ after discovery.
-        for (int i = 0; i < 100 && !running_.load(std::memory_order_acquire); ++i)
+        // Wait briefly for run(): it sets running_ after discovery. If stop()
+        // raced us and set stop_requested_, running_ will never come up —
+        // report failure honestly instead of returning true for a zombie.
+        for (int i = 0;
+             i < 100 && !running_.load(std::memory_order_acquire) &&
+             !stop_requested_.load(std::memory_order_acquire);
+             ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            // stop() won the race: reap the doomed thread before it can be
+            // move-assigned again (joinable -> terminate).
+            if (thread_.joinable()) thread_.join();
+            return false;
+        }
         return running_.load(std::memory_order_acquire);
     }
     void stop() {
+        // Separate flag: running_ is owned by run() (it stores true after
+        // discovery), so clearing it here could be resurrected by a racing
+        // run(). stop_requested_ is only ever written by stop().
+        stop_requested_.store(true, std::memory_order_release);
         running_.store(false);
         // Break the blocked epoll_wait (timeout is infinite): a write to the
         // eventfd makes it return with the wake fd ready. Safe: run() never
@@ -98,6 +115,10 @@ private:
     EvdevProducerConfig cfg_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    // Only ever written by stop(). Separate from running_ because run()
+    // stores true into running_ after discovery and would otherwise
+    // resurrect the flag during a stop()-during-discovery race.
+    std::atomic<bool> stop_requested_{false};
     int epoll_fd_ = -1;
     int wake_fd_ = -1;   // eventfd: written by stop() to break epoll_wait
     std::vector<CapturedDevice> devices_;
@@ -156,7 +177,7 @@ bool EvdevProducer::discover_devices() {
         struct libevdev* evdev = nullptr;
         if (libevdev_new_from_fd(fd, &evdev) < 0) { close(fd); udev_device_unref(dev); continue; }
 
-        printf("[producer] captured %s (%s)\n", devnode, libevdev_get_name(evdev));
+        fprintf(stderr, "[producer] captured %s (%s)\n", devnode, libevdev_get_name(evdev));
 
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLET;      // edge-triggered
@@ -268,6 +289,7 @@ void EvdevProducer::run() {
         fprintf(stderr, "[producer] no HID devices found\n");
         return;
     }
+    if (stop_requested_.load(std::memory_order_acquire)) return;
     running_.store(true);
 
     epoll_event events[16];
@@ -431,7 +453,7 @@ void EvdevProducer::run() {
                         break;
                     }
                 }
-                printf("[producer] device removed, %zu remain\n", devices_.size());
+                fprintf(stderr, "[producer] device removed, %zu remain\n", devices_.size());
                 if (devices_.empty()) {
                     // Last device gone: producer is dead-functionality. Exit
                     // cleanly so a subsequent start() can retry discovery.

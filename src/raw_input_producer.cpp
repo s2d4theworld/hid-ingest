@@ -49,22 +49,22 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                                                 RID_INPUT, heap_buf, &heap_size,
                                                 sizeof(RAWINPUTHEADER));
                         if (bytes != static_cast<UINT>(-1)) {
-                            ++self->oversize_count_;  // telemetry: complex device present
+                            self->oversize_count_.fetch_add(1, std::memory_order_relaxed);  // telemetry: complex device present
                             auto* raw = reinterpret_cast<RAWINPUT*>(heap_buf);
                             if (raw->header.dwType == RIM_TYPEMOUSE)
                                 self->emit_mouse_sample(raw->data.mouse);
                         } else {
-                            ++self->oversize_dropped_;  // retry failed
+                            self->oversize_dropped_.fetch_add(1, std::memory_order_relaxed);  // retry failed
                         }
                         free(heap_buf);
                     } else {
-                        ++self->oversize_dropped_;      // OOM
+                        self->oversize_dropped_.fetch_add(1, std::memory_order_relaxed);      // OOM
                     }
                 } else {
                     // Deliberately dropped: >4 KB comes from exotic digitizer
                     // collections; only mice are parsed anyway. Counted so the
                     // drop stays visible in telemetry.
-                    ++self->oversize_dropped_;
+                    self->oversize_dropped_.fetch_add(1, std::memory_order_relaxed);
                 }
                 // CRITICAL: forward so the system cleans up the handle.
                 return DefWindowProcW(hwnd, WM_INPUT, wparam, lparam);
