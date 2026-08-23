@@ -245,19 +245,31 @@ bool RawInputProducer::start() {
     stop_requested_.store(false, std::memory_order_release);
 
     if (thread_.joinable()) {
-        // A previous start() failed after spawning (run() bailed on
-        // CreateWindow/RegisterRawInput): the thread exited but stayed
-        // joinable, which would block every future start() forever. Reap it.
+        // A previous run() exited (failed start, or stop() raced and left
+        // the thread for us). Join is safe ONLY if the thread has actually
+        // finished — thread_exited_ tells us that. If it is still live
+        // (stop-during-run race where the caller ignored false), joining
+        // here would hang forever; refuse instead.
+        if (!thread_exited_.load(std::memory_order_acquire)) {
+            fprintf(stderr,
+                    "[producer] previous producer thread still live; "
+                    "call stop() before start()\n");
+            return false;
+        }
         thread_.join();
     }
 
     try {
+        thread_exited_.store(false, std::memory_order_release);
         thread_ = std::jthread([this] {
             if (cfg_.time_critical_priority)
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
             if (cfg_.core_affinity_mask)
                 SetThreadAffinityMask(GetCurrentThread(), cfg_.core_affinity_mask);
             run();
+            // Mark exited BEFORE the joinable flag matters to anyone; release
+            // pairs with start()'s acquire load so the reap branch is safe.
+            thread_exited_.store(true, std::memory_order_release);
         });
     } catch (...) {
         return false;

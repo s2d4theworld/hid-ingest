@@ -53,6 +53,10 @@ private:
     SpscRing<>&     ring_;
     ProducerConfig  cfg_;
     std::jthread    thread_;
+    // Set true by the producer lambda right before it returns; lets start()'s
+    // reap branch distinguish "thread finished" (safe to join) from "thread
+    // still live" (must not join — would hang).
+    std::atomic<bool> thread_exited_{true};
     std::atomic<bool> running_{false};
     // Only ever written by stop(). Separate from running_ because run()
     // stores true into running_ after setup and would otherwise resurrect

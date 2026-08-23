@@ -47,10 +47,26 @@ public:
         stop_requested_.store(false, std::memory_order_release);
 
         // Reap a dead thread from a previous failed start (e.g. no devices /
-        // discovery failure): it exited but stayed joinable. Move-assigning
-        // a joinable std::thread calls std::terminate().
-        if (thread_.joinable())
+        // discovery failure): it exited but stayed joinable. Join is safe
+        // only if the thread has finished (thread_exited_); if it is still
+        // live, joining here would hang forever — refuse instead.
+        if (thread_.joinable()) {
+            if (!thread_exited_.load(std::memory_order_acquire)) {
+                fprintf(stderr,
+                        "[producer] previous producer thread still live; "
+                        "call stop() before start()\n");
+                return false;
+            }
             thread_.join();
+            // Reap also owns fd teardown when stop() never ran: the exited
+            // run() left wake_fd_/epoll_fd_ open by design (stop()-owns-
+            // teardown invariant), and discover_devices() would otherwise
+            // overwrite them — leaking the old pair.
+            if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
+            if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
+            for (auto& d : devices_) { libevdev_free(d.dev); close(d.fd); }
+            devices_.clear();
+        }
 
         try { thread_ = std::thread([this] { run(); }); }
         catch (...) { return false; }
@@ -124,6 +140,10 @@ private:
     SpscRing<>& ring_;
     EvdevProducerConfig cfg_;
     std::thread thread_;
+    // Set true by the run() lambda right before it returns; lets start()'s
+    // reap branch distinguish "thread finished" (safe to join + reap fds)
+    // from "thread still live" (must not join — would hang).
+    std::atomic<bool> thread_exited_{true};
     std::atomic<bool> running_{false};
     // Only ever written by stop(). Separate from running_ because run()
     // stores true into running_ after discovery and would otherwise
@@ -481,7 +501,12 @@ void EvdevProducer::run() {
     devices_.clear();
     // NOTE: wake_fd_/epoll_fd_ are intentionally NOT closed here (same
     // reasoning as the no-devices early-out above). stop() performs the
-    // final teardown after join().
+    // final teardown after join(); if stop() is never called, start()'s
+    // reap branch closes them before spawning a new thread.
+
+    // Signal start()'s reap branch that this thread has finished and it is
+    // safe to join + tear down fds.
+    thread_exited_.store(true, std::memory_order_release);
 }
 
 } // namespace hid::evdev
