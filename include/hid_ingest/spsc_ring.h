@@ -55,7 +55,7 @@ public:
             tail = tail_.load(std::memory_order_acquire);
             if (head - tail == Capacity) {          // genuinely full
                 if constexpr (DropOnOverflow) {
-                    // drop NEWEST (see header note)
+                    // back-pressure: incoming sample dropped (see header note)
                     drop_counter_.fetch_add(1, std::memory_order_relaxed);
                 }
                 return false;

@@ -11,6 +11,7 @@
 #include <libevdev/libevdev.h>
 #include <libudev.h>
 #include <poll.h>
+#include <sys/eventfd.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/epoll.h>
@@ -46,6 +47,13 @@ public:
     }
     void stop() {
         running_.store(false);
+        // Break the blocked epoll_wait (timeout is infinite): a write to the
+        // eventfd makes it return with the wake fd ready.
+        if (wake_fd_ != -1) {
+            const uint64_t one = 1;
+            ssize_t r = write(wake_fd_, &one, sizeof(one));
+            (void)r;
+        }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -64,6 +72,7 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{false};
     int epoll_fd_ = -1;
+    int wake_fd_ = -1;   // eventfd: written by stop() to break epoll_wait
     std::vector<CapturedDevice> devices_;
     // Persistent button state: survives EV_SYN resets of the per-sample
     // accumulator, so mid-drag samples report the held buttons.
@@ -73,6 +82,14 @@ private:
 bool EvdevProducer::discover_devices() {
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ < 0) return false;
+
+    // Self-pipe: stop() writes here to break an otherwise-infinite epoll_wait.
+    wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (wake_fd_ < 0) { close(epoll_fd_); epoll_fd_ = -1; return false; }
+    epoll_event wake_ev{};
+    wake_ev.events = EPOLLIN;
+    wake_ev.data.fd = wake_fd_;
+    epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &wake_ev);
 
     struct udev* udev = udev_new();
     if (!udev) { close(epoll_fd_); epoll_fd_ = -1; return false; }
@@ -148,6 +165,14 @@ void EvdevProducer::run() {
         if (nfds < 0) { if (errno == EINTR) continue; break; }
 
         for (int i = 0; i < nfds; ++i) {
+            // Wake fd: shutdown signal — drain it and let the loop check exit.
+            if (events[i].data.fd == wake_fd_) {
+                uint64_t drain = 0;
+                ssize_t r = read(wake_fd_, &drain, sizeof(drain));
+                (void)r;
+                continue;
+            }
+
             struct libevdev* dev = nullptr;
             for (auto& d : devices_) if (d.fd == events[i].data.fd) dev = d.dev;
             if (!dev) continue;
@@ -169,10 +194,16 @@ void EvdevProducer::run() {
                         // 24.8 range of a raw int32 << 8.
                         if (ev.code == ABS_X) { acc.dx = (int64_t)ev.value << 8; has_motion = true; }
                         if (ev.code == ABS_Y) { acc.dy = (int64_t)ev.value << 8; has_motion = true; }
-                        if (ev.code == ABS_PRESSURE)
-                            acc.pressure = static_cast<uint16_t>(
-                                ev.value * 65535 /
-                                (libevdev_get_abs_maximum(dev, ABS_PRESSURE) ?: 1023));
+                        if (ev.code == ABS_PRESSURE) {
+                            // Clamp: some devices report negative/odd values;
+                            // pressure must stay in [0, max] before scaling.
+                            const int max_p =
+                                libevdev_get_abs_maximum(dev, ABS_PRESSURE) ?: 1023;
+                            const int v = ev.value < 0 ? 0
+                                        : (ev.value > max_p ? max_p : ev.value);
+                            acc.pressure =
+                                static_cast<uint16_t>(v * 65535 / max_p);
+                        }
                         break;
                     case EV_KEY:
                         // Persistent state: update button_state_ (survives
@@ -226,6 +257,7 @@ void EvdevProducer::run() {
         libevdev_free(d.dev);
         close(d.fd);
     }
+    if (wake_fd_ != -1) close(wake_fd_);
     close(epoll_fd_);
 }
 
