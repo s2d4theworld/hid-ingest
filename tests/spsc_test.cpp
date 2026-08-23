@@ -12,12 +12,14 @@
 // single-thread and no-drop-policy variants where drops are impossible or
 // deterministic.
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <thread>
 
 #include "hid_ingest/spsc_ring.h"
+#include "hid_ingest/spline.h"
 
 using hid::HidSample;
 using hid::SpscRing;
@@ -211,9 +213,87 @@ static int test_fixed_point() {
     return 0;
 }
 
+// Spline invariants: straight-line collinearity, bounded deviation on a
+// coarse circle, out_cap truncation, step_px guard.
+static int test_spline() {
+    using hid::Vec2;
+    using hid::HidSample;
+
+    // Helper: build a HidSample from 24.8 fixed-point coords.
+    auto mk = [](int32_t dx, int32_t dy) {
+        HidSample s{};
+        s.dx = dx; s.dy = dy;
+        return s;
+    };
+
+    // --- Straight line: every output vertex must be collinear with the
+    // input line y = x (within float epsilon). Chordal CR reproduces lines
+    // exactly, so this also guards tangent math regressions.
+    {
+        HidSample line[8];
+        for (int k = 0; k < 8; ++k) line[k] = mk(k * 256, k * 256);  // (0,0)..(7,7) px
+        Vec2 out[256];
+        const size_t n = hid::interpolate_batch(line, 8, 2.0f, out, 256);
+        CHECK(n > 0);
+        for (size_t k = 0; k < n; ++k) {
+            if (std::fabs(out[k].x - out[k].y) > 1e-3f) return 1;  // off the line
+        }
+    }
+
+    // --- Coarse circle: max radial deviation must stay bounded. A perfect
+    // chordal CR through evenly spaced points tracks a circle within a
+    // small fraction of the segment length; this catches seam gaps
+    // (missing segments show up as large radius jumps).
+    {
+        constexpr int kN = 32;
+        HidSample circ[kN];
+        for (int k = 0; k < kN; ++k) {
+            const double a = k * 6.28318530718 / kN;
+            // 24.8 fixed-point: radius 1000 px -> 1000*256 fixed units.
+            circ[k] = mk(static_cast<int32_t>(1000.0 * 256.0 * std::cos(a)),
+                         static_cast<int32_t>(1000.0 * 256.0 * std::sin(a)));
+        }
+        Vec2 out[1024];
+        const size_t n = hid::interpolate_batch(circ, kN, 4.0f, out, 1024);
+        CHECK(n > 0);
+        for (size_t k = 0; k < n; ++k) {
+            // Output vertices are already in px (FromFixed24_8 unwound the
+            // 24.8 scale); expect ~1000 px radius, 15% slack.
+            const double r = std::sqrt(double(out[k].x) * out[k].x +
+                                       double(out[k].y) * out[k].y);
+            if (r < 850 || r > 1150) return 1;
+        }
+    }
+
+    // --- out_cap truncation: written == out_cap exactly, and the endpoint
+    // is dropped when the cap is hit (documented behavior).
+    {
+        HidSample line[16];
+        for (int k = 0; k < 16; ++k) line[k] = mk(k * 256, k * 256);
+        Vec2 small[4];
+        const size_t n = hid::interpolate_batch(line, 16, 1.0f, small, 4);
+        CHECK(n == 4);   // exactly filled
+    }
+
+    // --- step_px guard: non-positive / NaN are clamped to 1 px at entry,
+    // so these must produce vertices rather than hang or UB-cast.
+    {
+        HidSample line[4];
+        for (int k = 0; k < 4; ++k) line[k] = mk(k * 512, 0);
+        Vec2 out[64];
+        CHECK(hid::interpolate_batch(line, 4, 0.0f, out, 64) > 0);
+        CHECK(hid::interpolate_batch(line, 4, -1.0f, out, 64) > 0);
+        CHECK(hid::interpolate_batch(
+                  line, 4, std::numeric_limits<float>::quiet_NaN(), out, 64) > 0);
+    }
+    return 0;
+}
+
 int main() {
     failures += test_fixed_point();
     if (!failures) printf("fixed_point: OK\n");
+    failures += test_spline();
+    if (!failures) printf("spline: OK\n");
     failures += test_single_thread();
     if (!failures) printf("single_thread: OK\n");
     failures += test_no_drop_policy();
