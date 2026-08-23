@@ -170,12 +170,18 @@ void EvdevProducer::handle_sync_loss(CapturedDevice* captured) {
         switch (ev.type) {
             case EV_ABS:
                 // Mirror-only update (no sample push during resync).
-                if (ev.code == ABS_X)
+                // Same int32 clamp as the normal EV_ABS path — extreme ABS
+                // values during resync must not wrap the mirror.
+                if (ev.code == ABS_X) {
+                    const int64_t v = static_cast<int64_t>(ev.value) << 8;
                     captured->last_x = static_cast<int32_t>(
-                        static_cast<int64_t>(ev.value) << 8);
-                if (ev.code == ABS_Y)
+                        v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                }
+                if (ev.code == ABS_Y) {
+                    const int64_t v = static_cast<int64_t>(ev.value) << 8;
                     captured->last_y = static_cast<int32_t>(
-                        static_cast<int64_t>(ev.value) << 8);
+                        v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : v));
+                }
                 break;
             case EV_KEY:
                 if (ev.code == BTN_LEFT)

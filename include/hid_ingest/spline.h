@@ -120,8 +120,12 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
                 emit(catmull_rom_segment(p, tt, static_cast<float>(s) / steps));
             }
         }
-        i += n;  // window fully splined through its last point (pts[n-1]);
-                 // segments [seg, seg+2] covered up to pts[n-1] inclusive
+        // Overlap by 3 points so the next window's first CR segment starts
+        // where this one ended (seg max here is n-3: pts[n-3]->pts[n-2] was
+        // the last segment splined; pts[n-2]->pts[n-1] belongs to the next
+        // window as its leading segment). Only the final short window (no
+        // next window follows) advances past everything.
+        if (count - i > n) i += n - 3; else i += n;
     }
 
     // Remainder: fewer than 4 unprocessed points remain after the last
