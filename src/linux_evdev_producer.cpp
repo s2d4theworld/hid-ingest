@@ -83,12 +83,17 @@ public:
             });
         }
         catch (...) { return false; }
-        // Wait briefly for run(): it sets running_ after discovery. If stop()
-        // raced us and set stop_requested_, running_ will never come up —
-        // report failure honestly instead of returning true for a zombie.
+        // Wait briefly for run(): it sets running_ after discovery. Exit the
+        // loop early when stop() raced (running_ will never come up) or the
+        // thread already exited on its own (fast discovery failure — no
+        // reason to burn the remaining ~1 s of wait). If stop() raced, do
+        // NOT join here: stop() on another thread may be joining the same
+        // std::thread concurrently — that is a data race; leave the
+        // joinable thread to stop().
         for (int i = 0;
              i < 100 && !running_.load(std::memory_order_acquire) &&
-             !stop_requested_.load(std::memory_order_acquire);
+             !stop_requested_.load(std::memory_order_acquire) &&
+             !thread_exited_.load(std::memory_order_acquire);
              ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
