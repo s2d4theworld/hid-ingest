@@ -20,7 +20,7 @@
 
 #include "hid_ingest/spsc_ring.h"
 
-namespace hid::linux {
+namespace hid::evdev {
 
 struct EvdevProducerConfig {
     int fifo_priority = 80;
@@ -157,9 +157,13 @@ void EvdevProducer::run() {
                                 (libevdev_get_abs_maximum(dev, ABS_PRESSURE) ?: 1023));
                         break;
                     case EV_KEY:
-                        if (ev.code == BTN_LEFT)  acc.buttons |= ev.value ? 0x01 : (uint16_t)~0x01;
-                        if (ev.code == BTN_RIGHT) acc.buttons |= ev.value ? 0x02 : (uint16_t)~0x02;
-                        if (ev.code == BTN_MIDDLE) acc.buttons |= ev.value ? 0x04 : (uint16_t)~0x04;
+                        // Set/clear the exact button bit (|= then &= ~mask).
+                        if (ev.code == BTN_LEFT)
+                            acc.buttons = ev.value ? (acc.buttons | 0x01)   : (acc.buttons & static_cast<uint16_t>(~0x01));
+                        if (ev.code == BTN_RIGHT)
+                            acc.buttons = ev.value ? (acc.buttons | 0x02)   : (acc.buttons & static_cast<uint16_t>(~0x02));
+                        if (ev.code == BTN_MIDDLE)
+                            acc.buttons = ev.value ? (acc.buttons | 0x04)   : (acc.buttons & static_cast<uint16_t>(~0x04));
                         break;
                     case EV_SYN:
                         if (ev.code == SYN_REPORT && has_motion) {

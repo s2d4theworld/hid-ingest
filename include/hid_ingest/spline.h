@@ -91,6 +91,12 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
         }
         centripetal_times(pts, n, ts);
 
+        // NOTE: re-parameterizing per window means tangents near chunk seams
+        // use slightly different chord times than a whole-batch fit would —
+        // sub-pixel discontinuities at seams are possible. Acceptable for the
+        // console demo; a GPU-side full-batch pass should be used if exact
+        // C1 continuity across chunks is required.
+
         // Subdivide each interior segment adaptively by screen-space distance.
         for (size_t seg = 1; seg + 2 < n && written < out_cap; ++seg) {
             Vec2 p[4]{ pts[seg - 1], pts[seg], pts[seg + 1], pts[seg + 2] };

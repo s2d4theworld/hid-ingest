@@ -3,15 +3,21 @@
 
 namespace hid::win32 {
 
-namespace {
-
-// SPSC = single producer; a static pointer lets the static WndProc reach the ring.
-std::atomic<SpscRing<>*> g_ring{nullptr};
-std::atomic<uint64_t>    g_pushed_count{0};
-
-} // namespace
-
 LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    // Instance is attached via GWLP_USERDATA at WM_NCCREATE (per-window state,
+    // no process-wide globals — multiple producers can coexist safely).
+    RawInputProducer* self = reinterpret_cast<RawInputProducer*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return TRUE;
+    }
+    if (!self)
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+
     switch (msg) {
         case WM_INPUT: {
             alignas(8) uint8_t raw_buffer[sizeof(RAWINPUT) + 64];  // stack, no heap
@@ -22,36 +28,36 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                                                sizeof(RAWINPUTHEADER));
             if (bytes != static_cast<UINT>(-1)) {
                 auto* raw = reinterpret_cast<RAWINPUT*>(raw_buffer);
-                SpscRing<>* ring = g_ring.load(std::memory_order_relaxed);
-                if (raw->header.dwType == RIM_TYPEMOUSE && ring) {
-                    const auto& m = raw->data.mouse;
-                    if (m.lLastX != 0 || m.lLastY != 0 ||
-                        (m.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP |
-                                            RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP |
-                                            RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_UP))) {
-                        HidSample sample{};
-                        if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
-                            // Absolute -> fixed-point 24.8 normalized to screen size.
-                            sample.dx = static_cast<int32_t>(
-                                (static_cast<int64_t>(m.lLastX) * 65536 /
-                                 static_cast<int64_t>(GetSystemMetrics(SM_CXSCREEN))) << 8);
-                            sample.dy = static_cast<int32_t>(
-                                (static_cast<int64_t>(m.lLastY) * 65536 /
-                                 static_cast<int64_t>(GetSystemMetrics(SM_CYSCREEN))) << 8);
-                            sample.buttons |= 0x8000;  // absolute-coordinate flag
-                        } else {
-                            sample.dx = m.lLastX;
-                            sample.dy = m.lLastY;
-                        }
-                        if (m.usButtonFlags & RI_MOUSE_WHEEL)
-                            sample.pressure = 0;
-                        sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0xFFFF);
-                        LARGE_INTEGER qpc{};
-                        QueryPerformanceCounter(&qpc);
-                        sample.timestamp = static_cast<uint32_t>(qpc.QuadPart & 0xFFFFFFFFu);
-                        if (ring->push(sample))
-                            g_pushed_count.fetch_add(1, std::memory_order_relaxed);
+                const auto& m = raw->data.mouse;
+                if (raw->header.dwType == RIM_TYPEMOUSE &&
+                    (m.lLastX != 0 || m.lLastY != 0 ||
+                     (m.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP |
+                                         RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP |
+                                         RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_UP)))) {
+                    HidSample sample{};
+                    // Coordinate units: dx/dy are fixed-point 24.8 SCREEN-space
+                    // sub-pixels. Relative moves are already integer pixels ->
+                    // shift into 24.8. Absolute digitizer coords span 0..65535
+                    // -> scale to the primary screen size first (int64 math,
+                    // no overflow), then shift.
+                    if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
+                        constexpr int64_t kAbsMax = 65535;
+                        const int64_t scr_w = GetSystemMetrics(SM_CXSCREEN);
+                        const int64_t scr_h = GetSystemMetrics(SM_CYSCREEN);
+                        sample.dx = static_cast<int32_t>(
+                            m.lLastX * scr_w / kAbsMax) << 8;
+                        sample.dy = static_cast<int32_t>(
+                            m.lLastY * scr_h / kAbsMax) << 8;
+                        sample.buttons |= 0x8000;  // absolute-coordinate flag
+                    } else {
+                        sample.dx = m.lLastX << 8;
+                        sample.dy = m.lLastY << 8;
                     }
+                    sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0xFFFF);
+                    LARGE_INTEGER qpc{};
+                    QueryPerformanceCounter(&qpc);
+                    sample.timestamp = static_cast<uint32_t>(qpc.QuadPart & 0xFFFFFFFFu);
+                    self->ring_.push(sample);   // DropOnOverflow handles full ring
                 }
             }
             // CRITICAL: forward so the system cleans up the handle and avoids re-delivery.
@@ -96,7 +102,8 @@ void RawInputProducer::run() {
     RegisterClassExW(&wc);
 
     hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
-                            HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+                            HWND_MESSAGE, nullptr, wc.hInstance,
+                            this);  // lpParam -> WM_NCCREATE -> GWLP_USERDATA
     if (!hwnd_) { running_.store(false); return; }
 
     if (!register_raw_input(hwnd_)) { running_.store(false); return; }
@@ -125,7 +132,6 @@ void RawInputProducer::run() {
 
 bool RawInputProducer::start() {
     if (thread_.joinable()) return false;
-    g_ring.store(&ring_, std::memory_order_relaxed);
 
     try {
         thread_ = std::jthread([this] {
@@ -136,7 +142,6 @@ bool RawInputProducer::start() {
             run();
         });
     } catch (...) {
-        g_ring.store(nullptr, std::memory_order_relaxed);
         return false;
     }
 
@@ -149,9 +154,13 @@ bool RawInputProducer::start() {
 void RawInputProducer::stop() {
     if (!thread_.joinable()) return;
     running_.store(false, std::memory_order_relaxed);
-    if (hwnd_) PostMessageW(hwnd_, WM_QUIT, 0, 0);
+    // hwnd_ is created/destroyed on the producer thread; PostMessageW is safe
+    // on a NULL or already-destroyed HWND only if we don't touch the handle
+    // afterwards — guard with a null check and rely on running_ to end the loop.
+    const HWND hwnd = hwnd_;
+    if (hwnd) PostMessageW(hwnd, WM_QUIT, 0, 0);
     thread_.join();
-    g_ring.store(nullptr, std::memory_order_relaxed);
+    hwnd_ = nullptr;
 }
 
 } // namespace hid::win32

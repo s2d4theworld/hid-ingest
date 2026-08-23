@@ -2,9 +2,24 @@
 // Lock-free SPSC ring buffer with cache-line isolation — spec section 2.
 //
 // Template params:
-//   Capacity      - power of two slot count (default 16384)
-//   DropOnOverflow - when true, push() on a full ring advances the consumer
-//                    tail to drop the OLDEST sample (latest-wins semantics).
+//   Capacity       - power of two slot count (default 16384)
+//   DropOnOverflow - kept for API compatibility. Semantics: when the ring is
+//                    full the INCOMING sample is dropped (back-pressure) and
+//                    `push` returns false with a bumped drop counter.
+//
+// WHY NOT drop-OLDEST: dropping the oldest requires the producer to advance
+// the consumer index (tail_), which races with the consumer's own advances —
+// a lost-update on a shared atomic that cannot be resolved without a CAS or
+// per-slot sequence numbers. A correct drop-oldest needs a Vyukov-style
+// seq-per-slot design (see README "Future Work"). For input ingestion drained
+// every frame, an overflowing 16384-deep ring means the consumer stalled for
+// ~65 ms at 8 kHz — back-pressure is the honest failure mode and the drop
+// counter surfaces it.
+//
+// Memory ordering:
+//   push: payload write -> release store of head_ (publish).
+//   pop : acquire load of head_ (observe) -> payload reads ->
+//         release store of tail_ (free slots).
 #pragma once
 
 #include <atomic>
@@ -24,31 +39,20 @@ class SpscRing {
 public:
     constexpr SpscRing() noexcept = default;
 
-    // Non-copyable, non-movable (atomics + shared state).
     SpscRing(const SpscRing&)            = delete;
     SpscRing& operator=(const SpscRing&) = delete;
 
-    /// Producer side: push one sample. Returns false if the ring was full
-    /// and DropOnOverflow == false. With DropOnOverflow == true it drops
-    /// the oldest sample and still returns false for the rejected write
-    /// (the incoming sample takes the newest slot).
+    /// Producer side: push one sample.
+    /// Returns true when appended normally; false when the ring was full and
+    /// the incoming sample was dropped (drop counter incremented).
     bool push(const HidSample& sample) noexcept {
         const size_t head = head_.load(std::memory_order_relaxed);
         size_t tail = tail_cached_;
 
         if (head - tail == Capacity) {
             tail = tail_.load(std::memory_order_acquire);
-            if (head - tail == Capacity) {
-                if constexpr (DropOnOverflow) {
-                    ++tail_cached_;          // drop oldest sample
-                    ++drop_counter_;
-                    // Overwrite oldest slot with the new sample.
-                    const size_t idx = head & (Capacity - 1);
-                    ring_[idx] = sample;
-                    head_.store(head + 1, std::memory_order_release);
-                    return false;
-                }
-                ++drop_counter_;
+            if (head - tail == Capacity) {          // genuinely full
+                ++drop_counter_;                    // drop NEWEST (see header note)
                 return false;
             }
             tail_cached_ = tail;
@@ -63,14 +67,10 @@ public:
     /// Consumer side: drain up to max_count samples into out[].
     /// Returns number of samples drained (0 when empty).
     size_t pop_batch(HidSample* out, size_t max_count) noexcept {
-        size_t tail = tail_.load(std::memory_order_relaxed);
-        size_t head = head_cached_;
+        const size_t tail = tail_.load(std::memory_order_relaxed);  // own index
+        const size_t head = head_.load(std::memory_order_acquire);
 
-        if (head == tail) {
-            head = head_.load(std::memory_order_acquire);
-            if (head == tail) return 0;
-            head_cached_ = head;
-        }
+        if (head <= tail) return 0;                    // empty
 
         const size_t available = head - tail;
         const size_t count = (available < max_count) ? available : max_count;
@@ -80,16 +80,15 @@ public:
             out[i] = ring_[idx];
         }
 
-        tail_.store(tail + count, std::memory_order_release); // release consumed
+        tail_.store(tail + count, std::memory_order_release); // free slots
         return count;
     }
 
-    // Approximate sizes (relaxed; for telemetry only).
     size_t size_approx() const noexcept {
-        return head_.load(std::memory_order_acquire) - tail_.load(std::memory_order_acquire);
+        return head_.load(std::memory_order_acquire) -
+               tail_.load(std::memory_order_acquire);
     }
     uint64_t dropped_approx() const noexcept { return drop_counter_; }
-
     static constexpr size_t capacity() noexcept { return Capacity; }
 
 private:
@@ -102,7 +101,6 @@ private:
 
     // Consumer-owned cache line.
     alignas(64) std::atomic<size_t> tail_{0};
-    size_t head_cached_ = 0;
 };
 
 static_assert(std::is_standard_layout_v<SpscRing<>>);
