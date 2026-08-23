@@ -140,7 +140,11 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
         sample.dx = m.lLastX << 8;
         sample.dy = m.lLastY << 8;
     }
-    sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0xFFFF);
+    // Mask to the documented contract: bits 0..3 (L/R/M down+up) plus the
+    // bit-15 absolute flag set above. RI_MOUSE_WHEEL and BUTTON_4/5 RI flags
+    // are deliberately not forwarded — wheel packets without movement are
+    // already filtered out at the top of this function.
+    sample.buttons |= static_cast<uint16_t>(m.ulButtons & 0x000F);
 
     // Timestamp basis: raw QPC truncated to 32 bits (~71 min wrap on typical
     // 10 MHz counters). Valid for per-platform DELTAS only, not absolute
@@ -203,6 +207,9 @@ void RawInputProducer::run() {
 }
 
 bool RawInputProducer::start() {
+    if (running_.load(std::memory_order_acquire))
+        return false;  // already live: double-start would deadlock the join below
+
     if (thread_.joinable()) {
         // A previous start() failed after spawning (run() bailed on
         // CreateWindow/RegisterRawInput): the thread exited but stayed

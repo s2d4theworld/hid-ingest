@@ -49,13 +49,19 @@ public:
     void stop() {
         running_.store(false);
         // Break the blocked epoll_wait (timeout is infinite): a write to the
-        // eventfd makes it return with the wake fd ready.
+        // eventfd makes it return with the wake fd ready. Safe: run() never
+        // closes these fds — it leaves them for this function's teardown
+        // after join(), so there is no check/close race.
         if (wake_fd_ != -1) {
             const uint64_t one = 1;
             ssize_t r = write(wake_fd_, &one, sizeof(one));
             (void)r;
         }
         if (thread_.joinable()) thread_.join();
+        // Final teardown (producer thread is gone; no race possible).
+        if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
+        if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
+        devices_.clear();
     }
 
 private:
@@ -371,12 +377,11 @@ void EvdevProducer::run() {
         close(d.fd);
     }
     devices_.clear();
-    // Reset to -1 AFTER close: stop() checks wake_fd_ != -1 before writing;
-    // a closed-but-non-negative fd could be reused by the kernel and receive
-    // the wake write meant for a dead producer.
-    if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
-    close(epoll_fd_);
-    epoll_fd_ = -1;
+    // NOTE: wake_fd_/epoll_fd_ are intentionally NOT closed here. stop()
+    // writes to wake_fd_ to break epoll_wait; closing it in this thread
+    // races with stop()'s check/write pair (the descriptor could be reused
+    // between the two). Ownership stays with this thread only until join();
+    // stop() performs the final teardown afterwards.
 }
 
 } // namespace hid::evdev
