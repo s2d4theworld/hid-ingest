@@ -34,7 +34,7 @@ int main() {
     Vec2 verts[4096];
     uint64_t frames = 0;
     while (!g_quit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));  // ~120 Hz consumer
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));  // ~125 Hz consumer
         const size_t n = ring.pop_batch(batch, 1024);
         ++frames;
         if (n == 0) continue;
