@@ -364,8 +364,13 @@ void EvdevProducer::run() {
         libevdev_free(d.dev);
         close(d.fd);
     }
-    if (wake_fd_ != -1) close(wake_fd_);
+    devices_.clear();
+    // Reset to -1 AFTER close: stop() checks wake_fd_ != -1 before writing;
+    // a closed-but-non-negative fd could be reused by the kernel and receive
+    // the wake write meant for a dead producer.
+    if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
     close(epoll_fd_);
+    epoll_fd_ = -1;
 }
 
 } // namespace hid::evdev

@@ -158,11 +158,16 @@ void RawInputProducer::run() {
     screen_w_ = GetSystemMetrics(SM_CXSCREEN);
     screen_h_ = GetSystemMetrics(SM_CYSCREEN);
 
+    // Per-instance class name: coexisting producers must not unregister each
+    // other's class on teardown.
+    wchar_t class_name[64];
+    swprintf_s(class_name, L"RawInputSinkWndClass_%p", this);
+
     WNDCLASSEXW wc{};
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = &RawInputProducer::wnd_proc;
     wc.hInstance     = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"RawInputSinkWndClass";
+    wc.lpszClassName = class_name;
     RegisterClassExW(&wc);
 
     hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
