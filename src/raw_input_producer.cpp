@@ -202,14 +202,14 @@ void RawInputProducer::run() {
     wc.lpfnWndProc   = &RawInputProducer::wnd_proc;
     wc.hInstance     = GetModuleHandleW(nullptr);
     wc.lpszClassName = class_name;
-    if (RegisterClassExW(&wc) == 0) { running_.store(false); return; }
+    if (RegisterClassExW(&wc) == 0) { running_.store(false, std::memory_order_relaxed); return; }
 
     hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0,
                             HWND_MESSAGE, nullptr, wc.hInstance,
                             this);  // lpParam -> WM_NCCREATE -> GWLP_USERDATA
     if (!hwnd_) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);  // no class-name leak
-        running_.store(false);
+        running_.store(false, std::memory_order_relaxed);
         return;
     }
 
@@ -217,7 +217,7 @@ void RawInputProducer::run() {
         DestroyWindow(hwnd_);
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         hwnd_ = nullptr;
-        running_.store(false);
+        running_.store(false, std::memory_order_relaxed);
         return;
     }
 
