@@ -53,6 +53,9 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{false};
     int epoll_fd_ = -1;
+    // Persistent button state: survives EV_SYN resets of the per-sample
+    // accumulator, so mid-drag samples report the held buttons.
+    uint16_t button_state_ = 0;
 };
 
 bool EvdevProducer::discover_devices() {
@@ -157,18 +160,24 @@ void EvdevProducer::run() {
                                 (libevdev_get_abs_maximum(dev, ABS_PRESSURE) ?: 1023));
                         break;
                     case EV_KEY:
-                        // Set/clear the exact button bit (|= then &= ~mask).
+                        // Persistent state: update button_state_ (survives
+                        // EV_SYN accumulator reset), then copy into acc.
                         if (ev.code == BTN_LEFT)
-                            acc.buttons = ev.value ? (acc.buttons | 0x01)   : (acc.buttons & static_cast<uint16_t>(~0x01));
+                            button_state_ = ev.value ? (button_state_ | 0x01)
+                                                     : (button_state_ & static_cast<uint16_t>(~0x01));
                         if (ev.code == BTN_RIGHT)
-                            acc.buttons = ev.value ? (acc.buttons | 0x02)   : (acc.buttons & static_cast<uint16_t>(~0x02));
+                            button_state_ = ev.value ? (button_state_ | 0x02)
+                                                     : (button_state_ & static_cast<uint16_t>(~0x02));
                         if (ev.code == BTN_MIDDLE)
-                            acc.buttons = ev.value ? (acc.buttons | 0x04)   : (acc.buttons & static_cast<uint16_t>(~0x04));
+                            button_state_ = ev.value ? (button_state_ | 0x04)
+                                                     : (button_state_ & static_cast<uint16_t>(~0x04));
+                        if (ev.value) has_motion = true;  // press is a reportable event
                         break;
                     case EV_SYN:
-                        if (ev.code == SYN_REPORT && has_motion) {
+                        if (ev.code == SYN_REPORT && (has_motion || button_state_)) {
                             acc.timestamp = static_cast<uint32_t>(
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
+                            acc.buttons = button_state_;   // always current state
                             ring_.push(acc);
                             acc = {};
                             has_motion = false;

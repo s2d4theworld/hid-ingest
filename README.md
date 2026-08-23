@@ -42,5 +42,13 @@ build\console_demo.exe               # move the mouse; Ctrl+C to quit
 - Ring capacity is a power of two (default 16,384); indexing via bitmask.
 - Producer/consumer state on separate 64-byte cache lines (no false sharing).
 - acquire/release ordering: release on publish (`head_`), acquire on observe.
-- Overflow policy: drop-oldest (latest-wins) with a drop counter for telemetry.
+- Overflow policy: drop-incoming (back-pressure) with a drop counter for telemetry.
+  `DropOnOverflow=false` rejects silently — caller owns drop accounting. A correct
+  latest-wins (drop-oldest) policy requires a Vyukov seq-per-slot ring; see the ring
+  header for why the naive version is racy.
+- Timestamps: Windows samples use QPC, Linux samples use kernel event time. They are
+  NOT comparable across platforms and wrap (Windows 32-bit truncation, ~71 min);
+  consumers must treat them as per-platform deltas only.
+- Known limitation (Linux): devices are discovered once at start; there is no
+  udev_monitor hotplug yet. A mouse plugged in later is not captured until restart.
 - Consumer drains once per frame into a stack buffer; no geometry rebuild when empty.

@@ -3,9 +3,10 @@
 //
 // Template params:
 //   Capacity       - power of two slot count (default 16384)
-//   DropOnOverflow - kept for API compatibility. Semantics: when the ring is
-//                    full the INCOMING sample is dropped (back-pressure) and
-//                    `push` returns false with a bumped drop counter.
+//   DropOnOverflow - true  (default): full ring drops the INCOMING sample
+//                    (back-pressure) and bumps the drop counter.
+//                    false : full ring rejects the sample silently; caller
+//                    detects via false return and counts drops itself.
 //
 // WHY NOT drop-OLDEST: dropping the oldest requires the producer to advance
 // the consumer index (tail_), which races with the consumer's own advances —
@@ -44,7 +45,8 @@ public:
 
     /// Producer side: push one sample.
     /// Returns true when appended normally; false when the ring was full and
-    /// the incoming sample was dropped (drop counter incremented).
+    /// the incoming sample was dropped. With DropOnOverflow=true the drop is
+    /// counted in dropped_approx(); with false the caller must count it.
     bool push(const HidSample& sample) noexcept {
         const size_t head = head_.load(std::memory_order_relaxed);
         size_t tail = tail_cached_;
@@ -52,7 +54,9 @@ public:
         if (head - tail == Capacity) {
             tail = tail_.load(std::memory_order_acquire);
             if (head - tail == Capacity) {          // genuinely full
-                ++drop_counter_;                    // drop NEWEST (see header note)
+                if constexpr (DropOnOverflow) {
+                    ++drop_counter_;                // drop NEWEST (see header note)
+                }
                 return false;
             }
             tail_cached_ = tail;

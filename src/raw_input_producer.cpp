@@ -153,12 +153,12 @@ bool RawInputProducer::start() {
 
 void RawInputProducer::stop() {
     if (!thread_.joinable()) return;
+    // hwnd_ lives entirely on the producer thread; running_=false makes the
+    // message loop exit, which destroys the window before join() returns.
+    // After join there is no concurrent access to hwnd_, so nulling it here
+    // is race-free. (PostMessageW from this thread was removed: it raced with
+    // window creation/teardown on the producer thread.)
     running_.store(false, std::memory_order_relaxed);
-    // hwnd_ is created/destroyed on the producer thread; PostMessageW is safe
-    // on a NULL or already-destroyed HWND only if we don't touch the handle
-    // afterwards — guard with a null check and rely on running_ to end the loop.
-    const HWND hwnd = hwnd_;
-    if (hwnd) PostMessageW(hwnd, WM_QUIT, 0, 0);
     thread_.join();
     hwnd_ = nullptr;
 }

@@ -102,13 +102,14 @@ static int test_single_thread() {
     return 0;
 }
 
-// DropOnOverflow=false variant: full ring must reject pushes without loss.
+// DropOnOverflow=false variant: full ring must reject pushes without loss,
+// and the caller owns drop accounting (ring counter stays 0).
 static int test_no_drop_policy() {
     SpscRing<128, false> ring;
     for (uint32_t i = 0; i < 128; ++i)
         CHECK(ring.push(make(i)));
     CHECK(!ring.push(make(999)));          // rejected
-    CHECK(ring.dropped_approx() == 1);
+    CHECK(ring.dropped_approx() == 0);     // silent: caller counts its own drops
 
     HidSample out[128];
     size_t total = ring.pop_batch(out, 128);
