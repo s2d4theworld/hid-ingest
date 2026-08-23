@@ -54,6 +54,11 @@ private:
     ProducerConfig  cfg_;
     std::jthread    thread_;
     std::atomic<bool> running_{false};
+    // Only ever written by stop(). Separate from running_ because run()
+    // stores true into running_ after setup and would otherwise resurrect
+    // the flag during a stop()-during-setup race (same pattern as the evdev
+    // producer's stop_requested_).
+    std::atomic<bool> stop_requested_{false};
     HWND            hwnd_ = nullptr;
     // Telemetry: atomics because they are written on the producer thread and
     // may be read cross-thread via the getters (relaxed is sufficient for

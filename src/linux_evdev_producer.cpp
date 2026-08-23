@@ -64,9 +64,12 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         if (stop_requested_.load(std::memory_order_acquire)) {
-            // stop() won the race: reap the doomed thread before it can be
-            // move-assigned again (joinable -> terminate).
-            if (thread_.joinable()) thread_.join();
+            // stop() won the race. Do NOT join here: stop() (on another
+            // thread) may be joining the same std::thread concurrently —
+            // concurrent join() on one thread object is a data race, and
+            // both sides would then tear down the fds (double-close).
+            // Leave the joinable thread to stop(); a future start()'s reap
+            // branch handles it if stop() is never called.
             return false;
         }
         return running_.load(std::memory_order_acquire);
@@ -88,9 +91,16 @@ public:
         }
         if (thread_.joinable()) thread_.join();
         // Final teardown (producer thread is gone; no race possible).
+        // Free captured devices first: if stop() raced a discovery-phase
+        // run(), devices_ may hold open fds + libevdev handles that the
+        // exited run() left behind.
+        for (auto& d : devices_) {
+            libevdev_free(d.dev);
+            close(d.fd);
+        }
+        devices_.clear();
         if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
         if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
-        devices_.clear();
     }
 
 private:

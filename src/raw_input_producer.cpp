@@ -203,10 +203,21 @@ void RawInputProducer::run() {
         return;
     }
 
+    if (stop_requested_.load(std::memory_order_acquire)) {
+        // stop() raced during setup: tear the window/class down here (the
+        // message loop never ran, so nothing else will) and leave without
+        // storing running_=true. hwnd_/class are fully released; stop()
+        // owns only the thread join.
+        DestroyWindow(hwnd_);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        hwnd_ = nullptr;
+        return;
+    }
     running_.store(true, std::memory_order_release);
 
     MSG msg;
-    while (running_.load(std::memory_order_relaxed)) {
+    while (running_.load(std::memory_order_relaxed) &&
+           !stop_requested_.load(std::memory_order_relaxed)) {
         // Sleep with zero CPU cost until a posted message arrives.
         MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_POSTMESSAGE,
                                     MWMO_INPUTAVAILABLE);
@@ -231,6 +242,7 @@ void RawInputProducer::run() {
 bool RawInputProducer::start() {
     if (running_.load(std::memory_order_acquire))
         return false;  // already live: double-start would deadlock the join below
+    stop_requested_.store(false, std::memory_order_release);
 
     if (thread_.joinable()) {
         // A previous start() failed after spawning (run() bailed on
@@ -251,19 +263,34 @@ bool RawInputProducer::start() {
         return false;
     }
 
-    // Wait briefly for the message loop to come up.
-    for (int i = 0; i < 100 && !running_.load(std::memory_order_acquire); ++i)
+    // Wait briefly for the message loop to come up. If stop() raced us, do
+    // NOT join here — stop() (another thread) may be joining the same
+    // std::jthread concurrently, which is a data race; leave the joinable
+    // thread to stop() and report failure honestly.
+    for (int i = 0;
+         i < 100 && !running_.load(std::memory_order_acquire) &&
+         !stop_requested_.load(std::memory_order_acquire);
+         ++i)
         Sleep(10);
+
+    if (stop_requested_.load(std::memory_order_acquire)) {
+        hwnd_ = nullptr;   // run()'s exit path destroyed it; drop our dangling copy
+        return false;
+    }
     return running_.load(std::memory_order_acquire);
 }
 
 void RawInputProducer::stop() {
+    // Set the flag FIRST so a run() still in setup bails before storing
+    // running_=true (resurrection prevention — same pattern as evdev).
+    stop_requested_.store(true, std::memory_order_release);
     if (!thread_.joinable()) return;
     // Wake the blocked MsgWaitForMultipleObjectsEx with a harmless posted
     // message. Safe: hwnd_ was created before running_ went true (start()
     // waits for running_), and stop() only proceeds when thread_ is live,
     // so the window exists for the whole lifetime of this call. The loop
-    // exits via running_, then DestroyWindow happens on the producer thread.
+    // exits via running_/stop_requested_, then DestroyWindow happens on the
+    // producer thread.
     if (hwnd_) PostMessageW(hwnd_, WM_APP, 0, 0);
     running_.store(false, std::memory_order_relaxed);
     thread_.join();
