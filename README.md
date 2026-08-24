@@ -25,7 +25,7 @@ examples/console_demo.cpp    live mouse demo printing drain stats
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-ctest --test-dir build
+ctest --test-dir build -C Release
 ```
 
 Windows: MSVC 2022+. Linux: `libevdev`, `libudev` required.

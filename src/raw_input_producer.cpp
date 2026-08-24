@@ -139,10 +139,14 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
         m.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP |
                            RI_MOUSE_RIGHT_BUTTON_DOWN | RI_MOUSE_RIGHT_BUTTON_UP |
                            RI_MOUSE_MIDDLE_BUTTON_DOWN | RI_MOUSE_MIDDLE_BUTTON_UP);
-    if (m.lLastX == 0 && m.lLastY == 0 && !button_event)
-        return;   // nothing reportable: wheel-only packets are deliberately
-                  // out of scope (HidSample has no wheel field) — documented
-                  // in hid_sample.h
+    const bool absolute = m.usFlags & MOUSE_MOVE_ABSOLUTE;
+    // Zero-delta early-out applies to RELATIVE packets only: for absolute
+    // mode (digitizers, RDP sessions) (0,0) is a legitimate position — the
+    // screen origin — and must be delivered. Wheel-only filtering stays
+    // unconditional: HidSample has no wheel field (documented in
+    // hid_sample.h).
+    if (!absolute && m.lLastX == 0 && m.lLastY == 0 && !button_event)
+        return;
 
     // Mirror button HELD STATE from the RI transition flags. Raw Input
     // reports DOWN/UP transitions per packet, but the HidSample contract is
