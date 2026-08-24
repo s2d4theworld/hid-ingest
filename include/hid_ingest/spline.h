@@ -100,6 +100,10 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
     emit({ FromFixed24_8(samples[0].dx), FromFixed24_8(samples[0].dy) });
 
     size_t i = 0;
+    // Loop needs 4 points for one CR segment. The final 1-2 samples of a
+    // batch therefore always fall to the remainder pass (straight line) —
+    // deliberate: full CR to the endpoint would need endpoint duplication
+    // or extrapolated tangent points. Documented trade-off; fine visually.
     while (i + 3 < count && written < out_cap) {
         const size_t n = (count - i < kWindow) ? (count - i) : kWindow;
         for (size_t j = 0; j < n; ++j) {
