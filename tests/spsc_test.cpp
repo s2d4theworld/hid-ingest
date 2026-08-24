@@ -285,6 +285,13 @@ static int test_spline() {
         CHECK(hid::interpolate_batch(line, 4, -1.0f, out, 64) > 0);
         CHECK(hid::interpolate_batch(
                   line, 4, std::numeric_limits<float>::quiet_NaN(), out, 64) > 0);
+
+        // Tiny POSITIVE step reaches the fs >= 32 branch: len/1e-30 is far
+        // beyond INT_MAX, so the round-41 float-domain cap (no int cast of
+        // an out-of-range quotient) must hold — steps saturate at 32 and
+        // the call still terminates with a bounded vertex count.
+        Vec2 wide[256];
+        CHECK(hid::interpolate_batch(line, 4, 1e-30f, wide, 256) > 0);
     }
     return 0;
 }
