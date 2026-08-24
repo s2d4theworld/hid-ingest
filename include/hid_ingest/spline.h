@@ -137,6 +137,8 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
         // pts[n-3]->pts[n-2], so advance only past that — samples[i+n-2]
         // and samples[i+n-1] fall through to the remainder pass, which
         // renders their connecting segment explicitly with sub-steps.
+        // (The remainder's first emitted vertex coincides with the last CR
+        // segment end at pts[n-2]; emit()'s dedupe swallows the duplicate.)
         if (count - i > n) i += n - 3; else i += n - 2;
     }
 

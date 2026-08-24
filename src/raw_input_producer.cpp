@@ -40,6 +40,10 @@ LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, 
                 // Packet exceeded the stack buffer. Retry on heap when the
                 // required size fits kHeapCap; count as dropped only if the
                 // retry is impossible (too large / OOM) or fails.
+                // CAVEAT: on an unexpected failure (not undersize) size may
+                // be left at kStackCap, so the packet lands in the
+                // oversize_dropped_ telemetry even though it was not truly
+                // oversize — telemetry is approximate for this rare path.
                 const bool retryable = size > kStackCap && size <= kHeapCap;
                 if (retryable) {
                     BYTE* heap_buf = static_cast<BYTE*>(malloc(size));
@@ -241,6 +245,10 @@ void RawInputProducer::run() {
     while (running_.load(std::memory_order_relaxed) &&
            !stop_requested_.load(std::memory_order_relaxed)) {
         // Sleep with zero CPU cost until a posted message arrives.
+        // NOTE: MWMO_INPUTAVAILABLE is technically a no-op here (it governs
+        // object-handle availability and we pass 0 handles) — the wake is
+        // purely the QS_POSTMESSAGE mask. Kept harmless; the flag does not
+        // imply hardware-input wake (WM_INPUT arrives via the queue).
         MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_POSTMESSAGE,
                                     MWMO_INPUTAVAILABLE);
 
