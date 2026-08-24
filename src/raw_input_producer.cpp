@@ -343,6 +343,13 @@ bool RawInputProducer::start() {
         thread_.join();
         return false;
     }
+    // TIMEOUT CASE (loop exhausted, thread still initializing): we return
+    // false but the producer may become live moments later. KNOWN
+    // LIMITATION: "false means no data" is not strictly guaranteed here —
+    // callers should treat false as "not confirmed" and either call stop()
+    // or check running()/start() again. Practically unreachable: setup is
+    // register-class + create-window + register-raw-input, milliseconds at
+    // worst.
     return running_.load(std::memory_order_acquire);
 }
 
