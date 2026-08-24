@@ -323,6 +323,27 @@ static int test_vyukov_drop_oldest() {
     HidSample one;
     CHECK(ring2.pop(one));
     CHECK(one.timestamp == 0);   // oldest intact — nothing was overwritten
+
+    // Regression (round 64): fill -> pop some -> push again. After the pops
+    // the ring has free slots; the next overflow push must take the normal
+    // writable path and the pushed sample MUST be readable afterwards
+    // (the old expect_released branch wrote without publishing).
+    SpscRingVyukov<64, true> ring3;
+    for (uint32_t i = 0; i < 64; ++i)
+        CHECK(ring3.push(make(i)));       // full
+    HidSample sink[8];
+    CHECK(ring3.pop_batch(sink, 8) == 8); // free 8 slots (tail_ -> 8)
+    for (uint32_t i = 0; i < 16; ++i)
+        CHECK(ring3.push(make(100 + i))); // 8 fill the holes, 8 drop-oldest
+    HidSample out2[72];
+    const size_t got = ring3.pop_batch(out2, 72);
+    CHECK(got == 64);
+    // Newest window: 100+15 was the last pushed; before it 100..114 then
+    // the surviving originals. Just verify order monotonic + last sample
+    // is the most recent push.
+    for (size_t k = 1; k < got; ++k)
+        CHECK(out2[k].timestamp > out2[k - 1].timestamp);
+    CHECK(out2[got - 1].timestamp == 115);
     return 0;
 }
 

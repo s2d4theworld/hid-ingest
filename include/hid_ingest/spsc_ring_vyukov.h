@@ -3,26 +3,25 @@
 // latest-wins (drop-oldest) overflow policy — the design the basic ring's
 // header explains is racy when done by mutating the consumer index.
 //
-// Layout: per-slot std::atomic<uint64_t> sequence + payload. head_ (writer
-// position, producer-owned) and tail_ (reader position, consumer-owned) are
-// monotonically increasing; slot i holds sequence == 2*i - ... no: each
-// slot's sequence stores the "turn" of the slot:
-//   writable  when seq == head_     (producer may write)
-//   readable  when seq == head_ + 1 (written; consumer may read)
-//   reusable  when seq == tail_ + Capacity (consumer finished with it)
+// Layout: per-slot atomic sequence + HidSample payload. head_ (writer
+// position, producer-owned) and tail_ (reader position, consumer-owned)
+// are monotonically increasing. Each slot's sequence encodes its state
+// relative to those positions:
+//   seq == pos          -> writable   (producer may write at pos)
+//   seq == pos + 1      -> readable   (written; consumer may read at pos)
+//   seq == pos + Capacity -> released (consumer finished; slot reusable)
 //
-// DROP-OLDEST on overflow (DropOnOverflow=true): if the ring is full the
-// producer does NOT wait and does NOT drop the incoming sample — it
-// advances tail_ by one (dropping the OLDEST sample) and overwrites that
-// slot. This is safe here precisely because the producer owns head_ and
-// the CONSUMER owns tail_: the producer may only bump tail_ when it has
-// observed, via slot sequences, that the consumer had already released
-// every slot up to that point... actually the reverse of the naive design:
-// here the producer writes into the slot whose sequence says the consumer
-// already freed it OR claims it under a single compare_exchange on that
-// one slot only — never a read-modify-write racing the consumer's own
-// tail_ advance. The consumer tolerates the tail moving under it via its
-// own re-checks.
+// DROP-OLDEST on overflow (DropOnOverflow=true): when full, the producer
+// targets the oldest slot (position head - Capacity) and either
+//   a) finds it already released (seq == head) — a plain writable slot;
+//      write and publish normally (no drop occurred), or
+//   b) claims it from the consumer with a single CAS
+//      (seq: readable-for-oldest -> readable-for-new-position), then
+//      advances tail_ past the evicted sample.
+// Only ONE slot's sequence is CAS'd — there is never a read-modify-write
+// race on shared indices, which is what made the naive design unsafe.
+// If the consumer wins the race mid-read, the producer rejects THIS
+// sample instead (counted; bounded and rare).
 //
 // DropOnOverflow=false behaves like the basic ring: full -> reject incoming,
 // return false, caller counts drops.
@@ -31,8 +30,9 @@
 //   push : write payload -> release store slot seq (publish)
 //   pop  : acquire load slot seq (observe) -> payload reads ->
 //          release store slot seq (free slot)
-//   tail_/head_ themselves: relaxed (ownership is single-writer; slot seqs
-//   carry the synchronization).
+//   tail_/head_ themselves: relaxed (ownership is single-writer except the
+//   drop-oldest tail bump, which pairs with the consumer's own advance via
+//   the slot sequences).
 #pragma once
 
 #ifdef _MSC_VER
@@ -165,11 +165,13 @@ private:
 
         int64_t cur = slot.seq.load(std::memory_order_acquire);
         if (cur == expect_released) {
-            // Consumer already released: plain write, like normal push.
+            // expect_released == head: the consumer already released this
+            // slot, so the ring is NOT actually full — this is a normal
+            // writable slot for position `head`. Publish it as such.
             slot.data = s;
+            slot.seq.store(head + 1, std::memory_order_release);   // publish
             head_.store(head + 1, std::memory_order_release);
-            tail_.store(tail + 1, std::memory_order_release);   // skip dropped
-            dropped_.fetch_add(1, std::memory_order_relaxed);
+            // tail_ needs no adjustment: the consumer advanced it itself.
             return true;
         }
         if (cur == expect_readable &&
