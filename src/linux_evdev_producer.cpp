@@ -162,9 +162,8 @@ private:
     /// Clamp + normalize an ABS_PRESSURE reading to 0..65535. Shared by the
     /// normal path and sync-loss replay so the mirror and the sample stream
     /// cannot diverge (e.g. one side rounding, the other truncating).
-    /// Overflow ceiling: v*65535 is computed in int64; a driver reporting an
-    /// ABS_PRESSURE max above ~7e10 would overflow — clamped to 65535 here
-    /// (any real device is far below that).
+    /// max_p is clamped to 65535, so v*65535 <= 65535*65535 ~ 4.3e9 — well
+    /// inside int64; overflow is impossible on this path.
     static uint16_t scale_pressure(struct libevdev* dev, int value) {
         const int64_t raw_max = libevdev_get_abs_maximum(dev, ABS_PRESSURE);
         const int64_t max_p = (raw_max > 0 && raw_max <= 65535) ? raw_max : 1023;
