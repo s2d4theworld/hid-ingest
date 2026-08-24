@@ -17,3 +17,6 @@ Thumbs.db
 
 # Stray test binary
 spsc_test_gcc
+
+# Test output artifacts
+test_out.txt
