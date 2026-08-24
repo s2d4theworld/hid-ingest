@@ -19,4 +19,4 @@ Thumbs.db
 spsc_test_gcc
 
 # Test output artifacts
-test_out.txt
+test_out*.txt

@@ -1,4 +1,0 @@
-Microsoft Windows [Version 10.0.26200.9168]
-(c) Microsoft Corporation. All rights reserved.
-
-C:\Project\hid-ingest>
