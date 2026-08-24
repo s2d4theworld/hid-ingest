@@ -170,6 +170,10 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
         // Sub-pixel precision: multiply and SHIFT in int64 FIRST, divide
         // LAST — dividing before the shift quantizes to whole pixels and
         // throws away the sub-pixel bits the 24.8 format exists for.
+        // KNOWN LIMITATION: screen_w_/screen_h_ == 0 (headless / no-monitor
+        // session, GetSystemMetrics returning 0) makes every absolute
+        // sample (0,0). Absolute input is meaningless without a display —
+        // not guarded beyond this note.
         const int64_t dx = (static_cast<int64_t>(m.lLastX) * screen_w_ << 8) / kAbsMax;
         const int64_t dy = (static_cast<int64_t>(m.lLastY) * screen_h_ << 8) / kAbsMax;
         sample.dx = clamp24(dx);

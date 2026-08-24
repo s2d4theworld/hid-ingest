@@ -2,6 +2,10 @@
 // Injects HidSamples at exactly 8 kHz (125 us interval) from a producer
 // thread while the main thread drains once per simulated frame tick.
 // Reports: delivered count, dropped count, worst/avg push latency.
+// NOTE: the reported WORST push latency is usually the FIRST iteration —
+// sleep_until catches up from t=0 and the first push measures scheduler
+// wake-up, not ring cost. Judge the ring by avg latency and steady-state
+// behavior, not that one outlier.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>

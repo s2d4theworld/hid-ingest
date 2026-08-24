@@ -17,7 +17,8 @@ src/
   linux_evdev_producer.cpp  Linux evdev/libevdev producer (SCHED_FIFO + epoll ET)
 tests/spsc_test.cpp      ordering/wraparound/MT stress tests
 benchmark/stress_ingest.cpp  synthetic 8 kHz ingestion stress test (spec 7.1)
-examples/console_demo.cpp    live mouse demo printing drain stats
+examples/console_demo.cpp    live mouse demo printing drain stats (Windows)
+examples/evdev_demo.cpp      live mouse demo printing drain stats (Linux)
 ```
 
 ## Build

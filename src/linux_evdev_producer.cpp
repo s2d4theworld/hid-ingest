@@ -423,11 +423,14 @@ void EvdevProducer::run() {
                         if (ev.code == REL_X) {
                             acc.dx = clamp24(static_cast<int64_t>(acc.dx) +
                                              (static_cast<int64_t>(ev.value) << 8));
+                            captured->last_x = acc.dx;   // track position for
+                                                         // button/pressure-only reuse
                             has_motion = true;
                         }
                         if (ev.code == REL_Y) {
                             acc.dy = clamp24(static_cast<int64_t>(acc.dy) +
                                              (static_cast<int64_t>(ev.value) << 8));
+                            captured->last_y = acc.dy;
                             has_motion = true;
                         }
                         break;
@@ -485,9 +488,14 @@ void EvdevProducer::run() {
                             (has_motion || has_button_change || has_pressure)) {
                             acc.timestamp = static_cast<uint32_t>(
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
-                            // Absolute devices that did not resend X/Y this
-                            // frame (pressure-only, button-only) reuse the
-                            // last known position instead of emitting (0,0).
+                            // Devices that did not resend position this frame
+                            // (pressure-only, button-only) reuse the last
+                            // known position instead of emitting (0,0).
+                            // last_x/last_y are maintained by BOTH paths:
+                            // ABS assigns them directly, REL accumulates
+                            // into them per event — so a mouse that sends a
+                            // button-only or pressure frame still carries
+                            // its true current position.
                             if (!has_motion && captured) {
                                 acc.dx = captured->last_x;
                                 acc.dy = captured->last_y;
