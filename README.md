@@ -1,8 +1,9 @@
 # hid-ingest — 8,000 Hz Raw HID Ingestion Engine
 
-Lock-free SPSC raw-input ingestion engine per the engineering spec
-(`../hid-ingestion-engine-spec.md`): up to 8,000 Hz pointer/stylus packets,
-zero heap allocations on the hot path, 0% idle CPU, sub-millisecond latency.
+Lock-free SPSC raw-input ingestion engine: up to 8,000 Hz pointer/stylus
+packets, zero heap allocations on the hot path, 0% idle CPU, sub-millisecond
+latency. (Originally developed against an external engineering spec; this
+document is self-contained.)
 
 ## Layout
 

@@ -35,9 +35,10 @@ int main() {
         frames += n;
         if (n == 0) continue;
 
-        // Latest sample wins for display; positions are fixed-point 24.8.
+        // Latest sample wins for display; values are fixed-point 24.8
+        // (absolute coords for tablets, last-frame delta for REL mice).
         const HidSample& s = batch[n - 1];
-        printf("\rframe %6llu | drained %4zu | pos (%d,%d)/256 px | btns %04x | dropped %llu   ",
+        printf("\rframe %6llu | drained %4zu | dxy (%d,%d)/256 px | btns %04x | dropped %llu   ",
                (unsigned long long)frames, n, s.dx, s.dy, s.buttons,
                (unsigned long long)ring.dropped_approx());
         fflush(stdout);
