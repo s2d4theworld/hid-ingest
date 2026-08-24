@@ -1,38 +1,47 @@
 // hid_ingest/core/spsc_ring_vyukov.h
-// SPSC ring with sequence-per-slot (Vyukov-style) enabling a CORRECT
-// latest-wins (drop-oldest) overflow policy — the design the basic ring's
-// header explains is racy when done by mutating the consumer index.
+// SPSC ring with sequence-per-slot (Vyukov-style) and a CORRECT latest-wins
+// (drop-oldest) overflow policy.
 //
-// Layout: per-slot atomic sequence + HidSample payload. head_ (writer
-// position, producer-owned) and tail_ (reader position, consumer-owned)
-// are monotonically increasing. Each slot's sequence encodes its state
-// relative to those positions:
-//   seq == pos          -> writable   (producer may write at pos)
-//   seq == pos + 1      -> readable   (written; consumer may read at pos)
-//   seq == pos + Capacity -> released (consumer finished; slot reusable)
+// DESIGN (v3 — skip watermark, no producer tail_ writes)
 //
-// DROP-OLDEST on overflow (DropOnOverflow=true): when full, the producer
-// targets the oldest slot (position head - Capacity) and either
-//   a) finds it already released (seq == head) — a plain writable slot;
-//      write and publish normally (no drop occurred), or
-//   b) claims it from the consumer with a single CAS
-//      (seq: readable-for-oldest -> readable-for-new-position), then
-//      advances tail_ past the evicted sample.
-// Only ONE slot's sequence is CAS'd — there is never a read-modify-write
-// race on shared indices, which is what made the naive design unsafe.
-// If the consumer wins the race mid-read, the producer rejects THIS
-// sample instead (counted; bounded and rare).
+// Ownership invariants:
+//   - head_ is written ONLY by the producer.
+//   - tail_ is written ONLY by the consumer.
+//     (v1 violated this: the producer bumped tail_ during drop-oldest,
+//      desynchronizing the consumer and allowing torn copies. v2 tried to
+//      encode skips in slot sequences alone — but once the producer reuses
+//      a skipped slot, the consumer cannot distinguish "skipped" from "not
+//      yet published" and stalls forever. v3 adds an explicit watermark.)
+//   - skip_to_ is written ONLY by the producer: the position one past the
+//     last evicted (dropped-oldest) sample. Monotonically non-decreasing.
 //
-// DropOnOverflow=false behaves like the basic ring: full -> reject incoming,
-// return false, caller counts drops.
+// Slot sequence states (per-slot atomic int64):
+//   seq == pos              -> writable  (producer may write at pos)
+//   seq == pos + 1          -> readable  (written; consumer may read)
+//   seq == released(pos)    -> free      (pos + Capacity; reusable next lap)
+//
+// DROP-OLDEST PROTOCOL:
+// When full at position `pos`, the oldest live sample is at
+// oldest = pos - Capacity. The producer CASes that slot's sequence from
+// readable(oldest) directly to released(oldest) — atomically skipping the
+// pop+release step — bumps skip_to_ to oldest+1, counts a drop, then writes
+// its payload into its own slot at pos (which is now legitimately writable).
+//
+// The CONSUMER, before each pop, fast-forwards: while tail_'s slot holds a
+// released stamp (seq == released(pos)), it advances tail_, counting each
+// as a drop. Because released stamps are only ever created by the producer
+// (drop path) or by the consumer's own pop, and the consumer checks them
+// BEFORE reading, a torn copy is impossible: any slot the producer may
+// overwrite has already been released by the time the producer CASes past
+// it — the CAS itself is the synchronization point.
 //
 // Ordering summary:
-//   push : write payload -> release store slot seq (publish)
-//   pop  : acquire load slot seq (observe) -> payload reads ->
-//          release store slot seq (free slot)
-//   tail_/head_ themselves: relaxed (ownership is single-writer except the
-//   drop-oldest tail bump, which pairs with the consumer's own advance via
-//   the slot sequences).
+//   push : write payload -> release store slot seq = readable(pos) ->
+//          head_ store (release). Drop path: acq_rel CAS on the victim
+//          slot + release store of skip_to_.
+//   pop  : catch-up (acquire loads; release stores freeing slots) ->
+//          acquire load slot seq -> payload copy -> release store
+//          seq = released(pos); tail_ store relaxed.
 #pragma once
 
 #ifdef _MSC_VER
@@ -58,56 +67,48 @@ public:
             slots_[i].seq.store(static_cast<int64_t>(i), std::memory_order_relaxed);
     }
 
-    /// Push one sample. Returns false only in the !DropOnOverflow full case
-    /// (or the extremely rare lost-race drop-oldest case, which still
-    /// delivered THIS sample — see below). Never blocks, never allocates.
+    /// Push one sample. Returns false only in the !DropOnOverflow full case.
+    /// With DropOnOverflow=true the push always succeeds (possibly evicting
+    /// the oldest sample). Never blocks, never allocates.
     bool push(const HidSample& s) {
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            int64_t pos = head_.load(std::memory_order_relaxed);
-            Slot& slot = slots_[pos & kMask];
+        const int64_t pos = head_.load(std::memory_order_relaxed);
+        Slot& slot = slots_[pos & kMask];
 
-            const int64_t seq = slot.seq.load(std::memory_order_acquire);
-            const intptr_t dif = static_cast<intptr_t>(seq) -
-                                 static_cast<intptr_t>(pos);
-
-            if (dif == 0) {
-                // Slot is writable for this position.
-                slot.data = s;
-                // Publish by stamping the slot readable-for-pos. The consumer
-                // observes this acquire-side, then frees the slot with
-                // seq = pos + Capacity.
-                slot.seq.store(pos + 1, std::memory_order_release);
-                head_.store(pos + 1, std::memory_order_release);
-                return true;
+        // Writable iff seq == pos (initial turn or fully released turn).
+        int64_t seq = slot.seq.load(std::memory_order_acquire);
+        if (seq != pos) {
+            if constexpr (!DropOnOverflow) {
+                dropped_.fetch_add(1, std::memory_order_relaxed);
+                return false;
             }
-            if constexpr (!DropOnOverflow)
-                break;
+            return drop_oldest_and_write(s, pos);
         }
-        // Ring full.
-        if constexpr (DropOnOverflow) {
-            return drop_oldest_and_write(s);
-        } else {
-            dropped_.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
+
+        slot.data = s;
+        // Publish: readable for pos. Release pairs with the consumer's
+        // acquire load before its payload copy.
+        slot.seq.store(pos + 1, std::memory_order_release);
+        head_.store(pos + 1, std::memory_order_release);
+        return true;
     }
 
-    /// Pop one sample. Returns false when empty.
+    /// Pop one sample. Returns false when empty (or everything remaining
+    /// was already skipped/dropped).
     bool pop(HidSample& out) {
-        int64_t pos = tail_.load(std::memory_order_relaxed);
+        catch_up_drops();   // consumer-side: advance tail_ past dropped
+
+        const int64_t pos = tail_.load(std::memory_order_relaxed);
         Slot& slot = slots_[pos & kMask];
 
         const int64_t seq = slot.seq.load(std::memory_order_acquire);
-        const intptr_t dif = static_cast<intptr_t>(seq) -
-                             static_cast<intptr_t>(pos + 1);
+        if (seq != pos + 1)
+            return false;   // not yet published (empty)
 
-        if (dif == 0) {
-            out = slot.data;
-            slot.seq.store(pos + Capacity, std::memory_order_release);  // free slot
-            tail_.store(pos + 1, std::memory_order_relaxed);
-            return true;
-        }
-        return false;
+        out = slot.data;    // safe: producer published via release; the slot
+                            // cannot be overwritten until WE release it
+        slot.seq.store(released(pos), std::memory_order_release);
+        tail_.store(pos + 1, std::memory_order_relaxed);
+        return true;
     }
 
     /// Drain up to max_count samples; returns how many were popped.
@@ -122,7 +123,7 @@ public:
         const int64_t h = head_.load(std::memory_order_relaxed);
         const int64_t t = tail_.load(std::memory_order_relaxed);
         const int64_t n = h - t;
-        return n > 0 ? static_cast<size_t>(n) : 0;   // clamp transient inversion
+        return n > 0 ? static_cast<size_t>(n) : 0;
     }
 
     uint64_t dropped_approx() const noexcept {
@@ -135,76 +136,92 @@ private:
         HidSample data;
     };
 
-    /// Full ring, latest-wins: overwrite the oldest slot.
+    static constexpr int64_t released(int64_t pos) { return pos + static_cast<int64_t>(Capacity); }
+
+    static constexpr size_t kMask = Capacity - 1;
+
+    /// Overflow (DropOnOverflow=true): evict the oldest live sample.
     ///
-    /// The oldest live sample occupies the slot at tail_pos = head_ -
-    /// Capacity. Its sequence equals tail_pos + Capacity iff the consumer
-    /// has already released it... it hasn't (that IS the oldest unconsumed).
-    /// The producer therefore CLAIMS the slot from the consumer side: CAS
-    /// the slot sequence from "readable for tail_pos" to "writable for
-    /// head_". If the CAS wins, the consumer will observe seq != expected
-    /// on its next read attempt and treat the position as skipped (its pop
-    /// fails, it retries at the next position — monotonic tail_ keeps
-    /// everything consistent because the producer also bumped tail_).
+    /// oldest_pos = pos - Capacity. Its slot sequence is one of:
+    ///   released(oldest_pos) — consumer already freed it: plain writable;
+    ///                          nothing is being dropped. Fall back to the
+    ///                          normal write attempt.
+    ///   readable(oldest_pos) — still unconsumed: atomically skip it by
+    ///                          CASing readable(oldest_pos) ->
+    ///                          released(oldest_pos) (the exact value a
+    ///                          legit pop+release would leave). Record the
+    ///                          eviction in skip_to_ so the consumer knows
+    ///                          to advance past it, count the drop, then
+    ///                          write our payload at pos.
+    /// Anything else — the consumer is mid-read on this slot; reject THIS
+    /// sample (counted; bounded and rare).
     ///
-    /// Single CAS on ONE slot: no read-modify-write races on shared indices,
-    /// which is what made the naive design unsafe.
-    bool drop_oldest_and_write(const HidSample& s) {
-        // NOTE on recursion: this may call push() when space has appeared;
-        // that inner push can only succeed via a writable slot or recurse
-        // back here at most once more (depth <= 2 in practice, and the
-        // expect_released branch no longer recurses). Bounded by the
-        // consumer's progress between the two tail_ loads.
-        const int64_t head = head_.load(std::memory_order_relaxed);
-        const int64_t tail = tail_.load(std::memory_order_acquire);
-        if (head - tail < static_cast<int64_t>(Capacity))
-            return push(s);   // space appeared; retry normally
+    /// CRITICAL: never writes tail_. The consumer discovers the eviction
+    /// through the slot's released stamp during its own catch-up pass.
+    bool drop_oldest_and_write(const HidSample& s, int64_t pos) {
+        const int64_t oldest_pos = pos - static_cast<int64_t>(Capacity);
+        Slot& victim = slots_[oldest_pos & kMask];
+        int64_t cur = victim.seq.load(std::memory_order_acquire);
 
-        const int64_t oldest_pos = head - Capacity;
-        Slot& slot = slots_[oldest_pos & kMask];
-
-        // Expected: consumer has observed this slot as readable-at-oldest_pos
-        // or has already moved past (released) it.
-        const int64_t expect_readable = oldest_pos + 1;
-        const int64_t expect_released = oldest_pos + Capacity;
-
-        int64_t cur = slot.seq.load(std::memory_order_acquire);
-        if (cur == expect_released) {
-            // expect_released == head: the consumer already released this
-            // slot, so the ring is NOT actually full — this is a normal
-            // writable slot for position `head`. Publish it as such.
-            slot.data = s;
-            slot.seq.store(head + 1, std::memory_order_release);   // publish
-            head_.store(head + 1, std::memory_order_release);
-            // tail_ needs no adjustment: the consumer advanced it itself.
-            return true;
+        if (cur == released(oldest_pos)) {
+            // Already freed — nothing to evict. Our target slot at pos must
+            // be writable now; retry the normal path.
+            return push(s);
         }
-        if (cur == expect_readable &&
-            slot.seq.compare_exchange_strong(cur, head + 1,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_acquire)) {
-            // Claimed the oldest slot away from the consumer. The CAS stamps
-            // it readable-for-`head` — exactly the position this push is
-            // about to publish (head_.store(head+1) below).
-            slot.data = s;
-            head_.store(head + 1, std::memory_order_release);
-            tail_.store(tail + 1, std::memory_order_release);   // skip dropped
-            dropped_.fetch_add(1, std::memory_order_relaxed);
-            return true;
+
+        if (cur == oldest_pos + 1) {
+            // Atomically skip the oldest sample: readable -> released.
+            if (victim.seq.compare_exchange_strong(
+                    cur, released(oldest_pos),
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                // Publish the eviction watermark BEFORE advancing head_,
+                // so the consumer can never observe head_ covering skipped
+                // positions without also seeing skip_to_ cover them.
+                skip_to_.store(oldest_pos + 1, std::memory_order_release);
+                dropped_.fetch_add(1, std::memory_order_relaxed);
+
+                // Our own target slot is now within range; write normally.
+                Slot& target = slots_[pos & kMask];
+                const int64_t tseq = target.seq.load(std::memory_order_acquire);
+                if (tseq == pos) {
+                    target.data = s;
+                    target.seq.store(pos + 1, std::memory_order_release);
+                    head_.store(pos + 1, std::memory_order_release);
+                    return true;
+                }
+                return push(s);   // became writable meanwhile; normal path
+            }
+            // Lost the CAS: consumer popped-and-released between load and
+            // CAS. Retry via normal push (the ring now has space).
+            return push(s);
         }
-        // Lost the race with the consumer mid-read: fall back to rejecting
-        // THIS sample (bounded, rare, and counted). Correctness intact.
+
+        // Consumer mid-read on the victim slot: reject THIS sample.
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
-    static constexpr size_t kMask = Capacity - 1;
+    /// Consumer-only: advance tail_ past every position the producer has
+    /// evicted (skip_to_ watermark), counting the drops. Slots are NOT
+    /// re-stamped here: the producer's drop path already left them in a
+    /// valid state (either released(pos) or — if it reused the slot for a
+    /// newer sample — readable-for-that-newer-position, which the consumer
+    /// must not clobber).
+    void catch_up_drops() {
+        const int64_t t = tail_.load(std::memory_order_relaxed);
+        const int64_t st = skip_to_.load(std::memory_order_acquire);
+        if (t >= st)
+            return;   // nothing skipped ahead of us
+        // The drop was already counted by the producer at eviction time.
+        tail_.store(st, std::memory_order_relaxed);
+    }
 
-    // Cache-line isolation: sequences array separate from indices; hot
-    // indices each get their own line.
-    alignas(64) std::atomic<int64_t> head_{0};   // producer-owned writes
-    alignas(64) std::atomic<int64_t> tail_{0};   // consumer-owned (+producer
-                                                 // drop-oldest skip, release)
+    alignas(64) std::atomic<int64_t> head_{0};    // producer-owned
+    alignas(64) std::atomic<int64_t> tail_{0};    // consumer-owned exclusively
+    alignas(64) std::atomic<int64_t> skip_to_{0}; // producer-owned eviction
+                                                  // watermark (one past the
+                                                  // last evicted position)
     alignas(64) std::atomic<uint64_t> dropped_{0};
     alignas(64) Slot slots_[Capacity];
 };
