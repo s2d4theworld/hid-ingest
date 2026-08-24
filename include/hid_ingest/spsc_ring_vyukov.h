@@ -27,12 +27,13 @@
 // pop+release step — bumps skip_to_ to oldest+1, counts a drop, then writes
 // its payload into its own slot at pos (which is now legitimately writable).
 //
-// The CONSUMER, before each pop, fast-forwards: while tail_'s slot holds a
-// released stamp (seq == released(pos)), it advances tail_, counting each
-// as a drop. Because released stamps are only ever created by the producer
-// (drop path) or by the consumer's own pop, and the consumer checks them
-// BEFORE reading, a torn copy is impossible: any slot the producer may
-// overwrite has already been released by the time the producer CASes past
+// The CONSUMER, before each pop, fast-forwards: it advances tail_ past all
+// evicted positions (up to the producer's skip_to_ watermark); the drops
+// were already counted by the producer at eviction time. Because released
+// stamps are only ever created by the producer (drop path) or by the
+// consumer's own pop, and the consumer checks them BEFORE reading, a torn
+// copy is impossible: any slot the producer may overwrite has already been
+// released by the time the producer CASes past
 // it — the CAS itself is the synchronization point.
 //
 // Ordering summary:
