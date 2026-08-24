@@ -19,10 +19,12 @@
 #include <thread>
 
 #include "hid_ingest/spsc_ring.h"
+#include "hid_ingest/spsc_ring_vyukov.h"
 #include "hid_ingest/spline.h"
 
 using hid::HidSample;
 using hid::SpscRing;
+using hid::SpscRingVyukov;
 
 static int failures = 0;
 
@@ -296,11 +298,41 @@ static int test_spline() {
     return 0;
 }
 
+// Vyukov seq-per-slot ring: latest-wins overflow (drop-oldest) must keep
+// the newest Capacity samples, in order, with the drop counter accurate.
+static int test_vyukov_drop_oldest() {
+    SpscRingVyukov<64, true> ring;
+
+    // Overfill well past capacity: only the newest 64 survive.
+    for (uint32_t i = 0; i < 200; ++i)
+        CHECK(ring.push(make(i)));   // drop-oldest always accepts THIS sample
+    CHECK(ring.dropped_approx() == 200 - 64);
+
+    HidSample out[64];
+    const size_t n = ring.pop_batch(out, 64);
+    CHECK(n == 64);
+    for (size_t i = 0; i < n; ++i)
+        CHECK(out[i].timestamp == 200 - 64 + i);   // newest window, ordered
+
+    // No-drop variant still rejects like the basic ring.
+    SpscRingVyukov<64, false> ring2;
+    for (uint32_t i = 0; i < 64; ++i)
+        CHECK(ring2.push(make(i)));
+    CHECK(!ring2.push(make(999)));
+    CHECK(ring2.dropped_approx() == 1);
+    HidSample one;
+    CHECK(ring2.pop(one));
+    CHECK(one.timestamp == 0);   // oldest intact — nothing was overwritten
+    return 0;
+}
+
 int main() {
     failures += test_fixed_point();
     if (!failures) printf("fixed_point: OK\n");
     failures += test_spline();
     if (!failures) printf("spline: OK\n");
+    failures += test_vyukov_drop_oldest();
+    if (!failures) printf("vyukov_drop_oldest: OK\n");
     failures += test_single_thread();
     if (!failures) printf("single_thread: OK\n");
     failures += test_no_drop_policy();

@@ -47,7 +47,10 @@ build\console_demo.exe               # move the mouse; Ctrl+C to quit
 - Overflow policy: drop-incoming (back-pressure) with a drop counter for telemetry.
   `DropOnOverflow=false` rejects silently — caller owns drop accounting. A correct
   latest-wins (drop-oldest) policy requires a Vyukov seq-per-slot ring; see the ring
-  header for why the naive version is racy.
+  header for why the naive version is racy. That variant now exists:
+  `include/hid_ingest/spsc_ring_vyukov.h` (SpscRingVyukov<Capacity, DropOnOverflow>)
+  — same push/pop API, but on overflow it overwrites the OLDEST sample and
+  keeps the incoming one, so consumers always see the newest window.
 - Timestamps: Windows samples use QPC, Linux samples use kernel event time. They are
   NOT comparable across platforms and wrap (Windows 32-bit truncation, ~71 min);
   consumers must treat them as per-platform deltas only.
