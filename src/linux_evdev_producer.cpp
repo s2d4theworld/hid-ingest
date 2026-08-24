@@ -37,6 +37,10 @@ public:
         : ring_(ring), cfg_(cfg) {}
     ~EvdevProducer() { stop(); }
 
+    // LIFECYCLE: stop() latches stop_requested_ permanently — a stop()
+    // before (or after) start() disables this instance until it is
+    // destroyed and recreated. Single-owner lifecycle by design.
+
     /// Mirrors RawInputProducer::running(): relaxed snapshot of the live
     /// flag. Complements start()'s documented "false = not confirmed"
     /// timeout case — callers can re-check here instead of guessing.

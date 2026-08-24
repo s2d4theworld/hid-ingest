@@ -33,6 +33,9 @@ public:
 
     ~RawInputProducer() { stop(); }
 
+    // LIFECYCLE: stop() latches stop_requested_ permanently — a stop()
+    // before (or after) start() disables this instance until it is
+    // destroyed and recreated. Single-owner lifecycle by design.
     bool start();
     void stop();
 
