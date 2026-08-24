@@ -685,6 +685,7 @@ void EvdevProducer::run() {
     for (auto& d : devices_) {
         libevdev_free(d.dev);
         close(d.fd);
+        free(d.syspath);   // strdup'd at capture
     }
     devices_.clear();
     // NOTE: wake_fd_/epoll_fd_ are intentionally NOT closed here (same
