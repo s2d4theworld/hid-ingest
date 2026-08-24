@@ -235,6 +235,56 @@ static int test_mt_stress() {
     printf("vyukov_mt_stress: %llu consumed + %llu dropped = %llu, order monotonic\n",
            (unsigned long long)vconsumed, (unsigned long long)vring.dropped_approx(),
            (unsigned long long)kCount);
+
+    // --- SLOW-CONSUMER Vyukov stress: deliberately starve the consumer so
+    // the ring overflows and the drop-oldest CAS path runs repeatedly under
+    // concurrency. Without this, dropped==0 proves the drop branch was
+    // never exercised (the test gap that hid the torn-copy race).
+    {
+        constexpr uint64_t kN = 500'000;
+        SpscRingVyukov<1024, true> slow;
+        std::atomic<bool> sdone{false};
+
+        std::thread sprod([&] {
+            for (uint64_t i = 0; i < kN; ++i) {
+                HidSample s{};
+                s.dx = static_cast<int32_t>(i & 0xFFFFFFFFull);
+                s.timestamp = static_cast<uint32_t>(i);
+                while (!slow.push(s)) {}   // latest-wins always accepts
+            }
+            sdone.store(true, std::memory_order_release);
+        });
+
+        uint32_t sprev = 0;
+        bool sfirst = true;
+        uint64_t sconsumed = 0;
+        HidSample sbatch[64];
+        while (!(sdone.load(std::memory_order_acquire) && slow.size_approx() == 0)) {
+            const size_t n = slow.pop_batch(sbatch, 64);
+            for (size_t i = 0; i < n; ++i, ++sconsumed) {
+                if (!sfirst && sbatch[i].timestamp <= sprev) {
+                    fprintf(stderr,
+                            "FAIL vyukov_slow: %u after %u (consumed=%llu)\n",
+                            sbatch[i].timestamp, sprev,
+                            (unsigned long long)sconsumed);
+                    sprod.join();
+                    return 1;
+                }
+                sfirst = false;
+                sprev = sbatch[i].timestamp;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        sprod.join();
+
+        CHECK(slow.dropped_approx() > 0);   // drop branch MUST have run
+        CHECK(sconsumed + slow.dropped_approx() == kN);
+        printf("vyukov_slow_consumer: %llu consumed + %llu dropped = %llu, "
+               "order monotonic\n",
+               (unsigned long long)sconsumed,
+               (unsigned long long)slow.dropped_approx(),
+               (unsigned long long)kN);
+    }
     return 0;
 }
 

@@ -1,6 +1,8 @@
 // hid_ingest/platform/win32/raw_input_producer.cpp — spec section 4.
 #include "hid_ingest/raw_input_producer.h"
 
+#include <cstdio>   // fprintf (telemetry warnings) — do not rely on transitive include
+
 namespace hid::win32 {
 
 LRESULT CALLBACK RawInputProducer::wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
