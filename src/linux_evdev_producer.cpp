@@ -77,7 +77,11 @@ public:
             // overwrite them — leaking the old pair.
             if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
             if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
-            for (auto& d : devices_) { libevdev_free(d.dev); close(d.fd); }
+            // Same invariant for the udev monitor/context.
+            if (udev_mon_) { udev_monitor_unref(udev_mon_); udev_mon_ = nullptr; }
+            udev_mon_fd_ = -1;
+            if (udev_) { udev_unref(udev_); udev_ = nullptr; }
+            for (auto& d : devices_) { libevdev_free(d.dev); close(d.fd); free(d.syspath); }
             devices_.clear();
         }
 
@@ -148,16 +152,24 @@ public:
         for (auto& d : devices_) {
             libevdev_free(d.dev);
             close(d.fd);
+            free(d.syspath);
         }
         devices_.clear();
         if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
         if (epoll_fd_ != -1) { close(epoll_fd_); epoll_fd_ = -1; }
+        // udev monitor teardown: monitor before its owning context.
+        if (udev_mon_) { udev_monitor_unref(udev_mon_); udev_mon_ = nullptr; }
+        udev_mon_fd_ = -1;
+        if (udev_) { udev_unref(udev_); udev_ = nullptr; }
     }
 
 private:
     struct CapturedDevice {
         int fd;
         struct libevdev* dev;
+        // udev syspath (strdup'd) for hotplug dedupe — libevdev has no
+        // devnode getter, so we compare syspaths on rescan.
+        char* syspath = nullptr;
         // Last known absolute position (24.8), per device. Pressure-only or
         // button-only SYN frames reuse it instead of emitting (0,0).
         int32_t last_x = 0;
@@ -183,6 +195,7 @@ private:
 
     void run();
     bool discover_devices();
+    void rescan_devices();   // hotplug: add newly appeared mice/tablets
     void handle_sync_loss(CapturedDevice* captured, bool* has_pending, input_event* pending);
 
     SpscRing<>& ring_;
@@ -206,6 +219,18 @@ private:
     // by the running_/stop_requested_ protocol.
     std::atomic<int> epoll_fd_{-1};
     std::atomic<int> wake_fd_{-1};   // eventfd: written by stop() to break epoll_wait
+    // udev_monitor hotplug: monitor fd is registered in the same epoll set
+    // as device fds; an event means "device added/removed" — re-scan. The
+    // monitor owns a udev handle that lives for the producer's lifetime.
+    // Created in discover_devices(), owned by stop()-owns-teardown like the
+    // other fds (run() never closes it).
+    struct udev* udev_ = nullptr;            // plain member: only touched on
+                                             // this (producer) thread after
+                                             // discover_devices() returns and
+                                             // before run() exits — no
+                                             // cross-thread access.
+    struct udev_monitor* udev_mon_ = nullptr;
+    int udev_mon_fd_ = -1;
     std::vector<CapturedDevice> devices_;
 };
 
@@ -235,12 +260,14 @@ bool EvdevProducer::discover_devices() {
         close(epoll_fd_); epoll_fd_ = -1;
         return false;
     }
+    udev_ = udev;   // keep the handle for the hotplug monitor below
     struct udev_enumerate* enumerate = udev_enumerate_new(udev);
     if (!enumerate) {
         // OOM edge: unref the udev handle and tear down fds — same cleanup
         // contract as the other failure paths above.
         if (wake_fd_ != -1) { close(wake_fd_); wake_fd_ = -1; }
         close(epoll_fd_); epoll_fd_ = -1;
+        udev_ = nullptr;
         udev_unref(udev);
         return false;
     }
@@ -282,12 +309,97 @@ bool EvdevProducer::discover_devices() {
             udev_device_unref(dev);
             continue;
         }
-        devices_.push_back({fd, evdev});
+        CapturedDevice cd;
+        cd.fd = fd; cd.dev = evdev;
+        cd.syspath = strdup(path);   // for hotplug dedupe (freed with the device)
+        devices_.push_back(cd);
         udev_device_unref(dev);
     }
     udev_enumerate_unref(enumerate);
-    udev_unref(udev);
+
+    // Hotplug: register a udev_monitor on the same subsystem so later
+    // plug/unplug events surface as epoll activity. The monitor fd joins
+    // the epoll set like a device fd; run() re-scans on any monitor event.
+    // Failure here is non-fatal (hotplug is an enhancement, initial
+    // discovery already succeeded) — log and continue without it.
+    udev_mon_ = udev_monitor_new_from_netlink(udev_, "udev");
+    if (udev_mon_) {
+        udev_monitor_filter_add_match_subsystem_devtype(udev_mon_, "input", nullptr);
+        udev_monitor_enable_receiving(udev_mon_);
+        udev_mon_fd_ = udev_monitor_get_fd(udev_mon_);
+        epoll_event mon_ev{};
+        mon_ev.events = EPOLLIN;      // level-triggered: fine for a rescan flag
+        mon_ev.data.fd = udev_mon_fd_;
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, udev_mon_fd_, &mon_ev) < 0) {
+            fprintf(stderr, "[producer] hotplug monitor unavailable\n");
+            udev_monitor_unref(udev_mon_); udev_mon_ = nullptr; udev_mon_fd_ = -1;
+        }
+    } else {
+        fprintf(stderr, "[producer] hotplug monitor unavailable\n");
+    }
+
+    // Keep the udev_ handle alive for the monitor's lifetime — libudev
+    // requires the udev context to outlive the monitor.
     return !devices_.empty();
+}
+
+/// Hotplug: a udev_monitor event arrived. Re-scan the input subsystem and
+/// capture any mouse/tablet not already captured. Removals are handled
+/// separately by the -ENODEV path on each device fd, so this only ADDS.
+void EvdevProducer::rescan_devices() {
+    struct udev_enumerate* enumerate = udev_enumerate_new(udev_);
+    if (!enumerate) return;   // OOM: skip this rescan cycle
+    udev_enumerate_add_match_subsystem(enumerate, "input");
+    udev_enumerate_scan_devices(enumerate);
+    struct udev_list_entry* entries = udev_enumerate_get_list_entry(enumerate);
+    struct udev_list_entry* entry;
+
+    udev_list_entry_foreach(entry, entries) {
+        const char* path = udev_list_entry_get_name(entry);
+        struct udev_device* dev = udev_device_new_from_syspath(udev_, path);
+        if (!dev) continue;
+        const char* devnode = udev_device_get_devnode(dev);
+        if (!devnode || !strstr(devnode, "event")) { udev_device_unref(dev); continue; }
+
+        // Dedupe first (cheap): the same syspath can re-appear in metadata
+        // events even though we already hold that device open. libevdev has
+        // no devnode getter, so compare the udev syspath against a stored
+        // per-device syspath captured at open time.
+        bool dup = false;
+        for (auto& d : devices_) {
+            if (d.syspath && strcmp(d.syspath, path) == 0) { dup = true; break; }
+        }
+        if (dup) { udev_device_unref(dev); continue; }
+
+        const char* mouse = udev_device_get_property_value(dev, "ID_INPUT_MOUSE");
+        const char* tablet = udev_device_get_property_value(dev, "ID_INPUT_TABLET");
+        if ((!mouse || strcmp(mouse, "1") != 0) && (!tablet || strcmp(tablet, "1") != 0)) {
+            udev_device_unref(dev);
+            continue;
+        }
+
+        int fd = open(devnode, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) { udev_device_unref(dev); continue; }
+        struct libevdev* evdev = nullptr;
+        if (libevdev_new_from_fd(fd, &evdev) < 0) { close(fd); udev_device_unref(dev); continue; }
+
+        epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLET;   // edge-triggered, same as initial scan
+        ev.data.fd = fd;
+        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
+            fprintf(stderr, "[producer] hotplug: epoll_ctl add failed for %s\n", devnode);
+            libevdev_free(evdev); close(fd); udev_device_unref(dev);
+            continue;
+        }
+        fprintf(stderr, "[producer] hotplug captured %s (%s)\n",
+                devnode, libevdev_get_name(evdev));
+        CapturedDevice cd;
+        cd.fd = fd; cd.dev = evdev;
+        cd.syspath = strdup(path);   // for hotplug dedupe (freed with the device)
+        devices_.push_back(cd);
+        udev_device_unref(dev);
+    }
+    udev_enumerate_unref(enumerate);
 }
 
 /// Resync after an event gap: replay the SYNC events through the same
@@ -394,6 +506,18 @@ void EvdevProducer::run() {
                 uint64_t drain = 0;
                 ssize_t r = read(wake_fd_, &drain, sizeof(drain));
                 (void)r;
+                continue;
+            }
+            // Hotplug monitor: a device appeared (or metadata changed).
+            // Re-scan and capture anything new. Level-triggered, so drain
+            // the socket to avoid a busy-loop on a persistent event.
+            if (udev_mon_fd_ != -1 && events[i].data.fd == udev_mon_fd_) {
+                struct udev_device* ud = nullptr;
+                do {
+                    ud = udev_monitor_receive_device(udev_mon_);
+                    if (ud) udev_device_unref(ud);
+                } while (ud);
+                rescan_devices();
                 continue;
             }
 
@@ -542,6 +666,7 @@ void EvdevProducer::run() {
                         epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, devices_[d].fd, nullptr);
                         libevdev_free(devices_[d].dev);
                         close(devices_[d].fd);
+                        free(devices_[d].syspath);   // strdup'd at capture
                         devices_.erase(devices_.begin() + d);
                         break;
                     }

@@ -51,6 +51,9 @@ build\console_demo.exe               # move the mouse; Ctrl+C to quit
 - Timestamps: Windows samples use QPC, Linux samples use kernel event time. They are
   NOT comparable across platforms and wrap (Windows 32-bit truncation, ~71 min);
   consumers must treat them as per-platform deltas only.
-- Known limitation (Linux): devices are discovered once at start; there is no
-  udev_monitor hotplug yet. A mouse plugged in later is not captured until restart.
+- Known limitation (Linux): hotplug is supported via udev_monitor — devices
+  plugged in after start() are captured automatically (removals handled via
+  -ENODEV). Metadata-only events may trigger a redundant rescan (deduped).
+  Requires the udev netlink socket to be permitted (unavailable in some
+  containers; the producer then runs with initial discovery only).
 - Consumer drains once per frame into a stack buffer; no geometry rebuild when empty.
