@@ -10,7 +10,7 @@ zero heap allocations on the hot path, 0% idle CPU, sub-millisecond latency.
 include/hid_ingest/
   hid_sample.h           packed 16-byte POD (fixed-point 24.8)
   spsc_ring.h            lock-free SPSC ring, cache-line isolated, DropOnOverflow
-  spline.h               centripetal Catmull-Rom + cubic Hermite interpolation
+  spline.h               chordal Catmull-Rom + cubic Hermite interpolation
   raw_input_producer.h   Win32 producer API
 src/
   raw_input_producer.cpp Win32 Raw Input producer (message-only window, WM_INPUT)
