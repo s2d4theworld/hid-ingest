@@ -45,7 +45,7 @@ inline Vec2 hermite(Vec2 p0, Vec2 p1, Vec2 m0, Vec2 m1, float s) {
 /// 4-point window [p0..p3] and their parameterization times t[0..3], at
 /// u in (0,1). (Parameterization is chordal — see chordal_times note.)
 inline Vec2 catmull_rom_segment(const Vec2* p, const float* t, float u) {
-    // Finite-difference tangents scaled by chord times (centripetal CR form).
+    // Finite-difference tangents scaled by chord times (chordal CR form).
     const float dt0 = t[1] - t[0], dt1 = t[2] - t[1], dt2 = t[3] - t[2];
     Vec2 m1{}, m2{};
     if (dt0 > 0 && dt1 > 0) {
