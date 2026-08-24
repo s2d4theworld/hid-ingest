@@ -192,6 +192,49 @@ static int test_mt_stress() {
     printf("mt_stress: %llu consumed + %llu dropped = %llu, order monotonic\n",
            (unsigned long long)consumed, (unsigned long long)ring.dropped_approx(),
            (unsigned long long)kCount);
+
+    // --- Vyukov variant under the same MT stress: exercises the CAS-vs-
+    // consumer drop-oldest branch (unreachable single-threaded).
+    SpscRingVyukov<16384, true> vring;
+    std::atomic<bool> vdone{false};
+
+    std::thread vproducer([&] {
+        for (uint64_t i = 0; i < kCount; ++i) {
+            HidSample s{};
+            s.dx = static_cast<int32_t>(i & 0xFFFFFFFFull);
+            s.dy = -s.dx;
+            s.timestamp = static_cast<uint32_t>(i);
+            vring.push(s);   // drop-oldest always accepts THIS sample
+        }
+        vdone.store(true, std::memory_order_release);
+    });
+
+    uint32_t vlast = 0;
+    bool vfirst = true;
+    uint64_t vconsumed = 0;
+    while (!(vdone.load(std::memory_order_acquire) && vring.size_approx() == 0)) {
+        const size_t n = vring.pop_batch(batch, 512);
+        for (size_t i = 0; i < n; ++i, ++vconsumed) {
+            if (!vfirst && batch[i].timestamp <= vlast) {  // strict order invariant
+                fprintf(stderr, "FAIL vyukov_mt_stress: %u after %u (consumed=%llu)\n",
+                        batch[i].timestamp, vlast, (unsigned long long)vconsumed);
+                vproducer.join();
+                return 1;
+            }
+            vfirst = false;
+            vlast = batch[i].timestamp;
+        }
+        std::this_thread::yield();
+    }
+    vproducer.join();
+
+    fprintf(stderr, "[vyukov_mt_stress] consumed=%llu dropped=%llu\n",
+            (unsigned long long)vconsumed,
+            (unsigned long long)vring.dropped_approx());
+    CHECK(vconsumed + vring.dropped_approx() == kCount);
+    printf("vyukov_mt_stress: %llu consumed + %llu dropped = %llu, order monotonic\n",
+           (unsigned long long)vconsumed, (unsigned long long)vring.dropped_approx(),
+           (unsigned long long)kCount);
     return 0;
 }
 

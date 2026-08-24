@@ -537,7 +537,12 @@ void EvdevProducer::run() {
             while (true) {
                 if (!process_pending.empty()) {
                     // A sync drain handed back a real normal event — run it
-                    // through this same state machine.
+                    // through this same state machine. NOTE: rc keeps its
+                    // previous value (SYNC) on this iteration; that is safe
+                    // because pending is only filled after rc == SYNC and
+                    // the post-loop checks (SYNC resync / -ENODEV removal)
+                    // remain the correct actions for this fd. If the sync
+                    // flow ever changes, refresh rc here too.
                     ev = process_pending.front();
                     process_pending.pop();
                 } else {

@@ -150,6 +150,11 @@ private:
     /// Single CAS on ONE slot: no read-modify-write races on shared indices,
     /// which is what made the naive design unsafe.
     bool drop_oldest_and_write(const HidSample& s) {
+        // NOTE on recursion: this may call push() when space has appeared;
+        // that inner push can only succeed via a writable slot or recurse
+        // back here at most once more (depth <= 2 in practice, and the
+        // expect_released branch no longer recurses). Bounded by the
+        // consumer's progress between the two tail_ loads.
         const int64_t head = head_.load(std::memory_order_relaxed);
         const int64_t tail = tail_.load(std::memory_order_acquire);
         if (head - tail < static_cast<int64_t>(Capacity))
