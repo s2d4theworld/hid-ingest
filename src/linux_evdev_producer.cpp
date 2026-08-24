@@ -490,12 +490,14 @@ void EvdevProducer::run() {
                                 (uint64_t)ev.input_event_sec * 1000000 + ev.input_event_usec);
                             // Devices that did not resend position this frame
                             // (pressure-only, button-only) reuse the last
-                            // known position instead of emitting (0,0).
-                            // last_x/last_y are maintained by BOTH paths:
-                            // ABS assigns them directly, REL accumulates
-                            // into them per event — so a mouse that sends a
-                            // button-only or pressure frame still carries
-                            // its true current position.
+                            // reported position instead of emitting (0,0).
+                            // Semantics differ by mode: ABS devices carry a
+                            // true current position (last_x/last_y hold the
+                            // absolute coords). REL devices have no absolute
+                            // concept — last_x/last_y hold the LAST FRAME'S
+                            // DELTA (acc resets each SYN_REPORT), so a
+                            // button-only frame repeats that delta rather
+                            // than teleporting to (0,0).
                             if (!has_motion && captured) {
                                 acc.dx = captured->last_x;
                                 acc.dy = captured->last_y;
