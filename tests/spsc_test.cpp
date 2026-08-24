@@ -301,8 +301,8 @@ int main() {
     failures += test_interleaved_overflow();
     if (!failures) printf("interleaved_overflow: OK\n");
     if (!failures) {
+        // mt_stress prints its own OK line on success.
         failures += test_mt_stress();
-        if (!failures) { /* mt_stress prints its own OK line */ }
     }
 
     {

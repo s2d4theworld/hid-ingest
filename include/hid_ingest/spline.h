@@ -118,8 +118,12 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
             float tt[4]{ ts[seg - 1], ts[seg], ts[seg + 1], ts[seg + 2] };
 
             const float len = std::sqrt(dist_sq(p[1], p[2]));
-            int steps = static_cast<int>(len / step_px) + 1;
-            if (steps > 32) steps = 32;
+            // Decide the step count in float domain BEFORE narrowing: a tiny
+            // positive step makes len/step exceed INT_MAX, and converting a
+            // float whose truncated value is out of int range is UB — the
+            // 32-cap below would come too late.
+            const float fs = len / step_px;
+            const int steps = (fs >= 32.0f) ? 32 : (static_cast<int>(fs) + 1);
 
             for (int s = 1; s <= steps && written < out_cap; ++s) {
                 emit(catmull_rom_segment(p, tt, static_cast<float>(s) / steps));
@@ -149,8 +153,9 @@ inline size_t interpolate_batch(const HidSample* samples, size_t count,
             // least one sub-step so the tail never visually jumps a whole
             // sample gap. Capped at 32 like the CR loop — a very long
             // straight remainder segment does not need hundreds of vertices.
-            int steps = static_cast<int>(len / step_px) + 1;
-            if (steps > 32) steps = 32;
+            // Float-domain comparison before narrowing (same UB rationale).
+            const float fs = len / step_px;
+            const int steps = (fs >= 32.0f) ? 32 : (static_cast<int>(fs) + 1);
             for (int s = 1; s <= steps && written < out_cap; ++s) {
                 const float t = static_cast<float>(s) / steps;
                 emit({ prev_pt.x + (pt.x - prev_pt.x) * t,
