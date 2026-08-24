@@ -16,7 +16,7 @@ Thumbs.db
 .DS_Store
 
 # Stray test binary
-spsc_test_gcc
+spsc_test*
 
 # Test output artifacts
 test_out*.txt

@@ -37,6 +37,11 @@ public:
         : ring_(ring), cfg_(cfg) {}
     ~EvdevProducer() { stop(); }
 
+    /// Mirrors RawInputProducer::running(): relaxed snapshot of the live
+    /// flag. Complements start()'s documented "false = not confirmed"
+    /// timeout case — callers can re-check here instead of guessing.
+    bool running() const noexcept { return running_.load(std::memory_order_relaxed); }
+
     /// Returns true only if the producer thread is up AND at least one device
     /// was captured. A false return means the caller should not expect data.
     /// Calling start() on an already-live producer returns false — move-
