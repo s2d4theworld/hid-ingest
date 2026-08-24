@@ -30,7 +30,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Windows: MSVC 2022+. Linux: `libevdev`, `libudev` required.
+Windows: MSVC 2022+ (VS 18 2026 tested). Linux: `libevdev`, `libudev` required.
 
 ## Run
 

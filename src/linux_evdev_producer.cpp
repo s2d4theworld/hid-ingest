@@ -127,9 +127,11 @@ public:
         // same thread (UB). Single-owner lifecycle: exactly one caller owns
         // shutdown. Same contract as RawInputProducer::stop().
         //
-        // Separate flag: running_ is owned by run() (it stores true after
-        // discovery), so clearing it here could be resurrected by a racing
-        // run(). stop_requested_ is only ever written by stop().
+        // Separate flag: running_ is primarily driven by run() (it stores
+        // true after discovery); stop() also stores false as part of
+        // shutdown. Atomic makes the dual access race-free; the flag is
+        // one-directional after stop_requested_ latches, so behavior is
+        // deterministic despite two writers.
         stop_requested_.store(true, std::memory_order_release);
         running_.store(false);
         // Break the blocked epoll_wait: a write to the eventfd makes it
