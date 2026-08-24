@@ -165,7 +165,7 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
     if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   button_mirror_ &= static_cast<uint16_t>(~0x04);
 
     HidSample sample{};
-    if (m.usFlags & MOUSE_MOVE_ABSOLUTE) {
+    if (absolute) {
         constexpr int64_t kAbsMax = 65535;
         // Sub-pixel precision: multiply and SHIFT in int64 FIRST, divide
         // LAST — dividing before the shift quantizes to whole pixels and
