@@ -58,6 +58,12 @@ build\console_demo.exe               # move the mouse; Ctrl+C to quit
 - Timestamps: Windows samples use QPC, Linux samples use kernel event time. They are
   NOT comparable across platforms and wrap (Windows 32-bit truncation, ~71 min);
   consumers must treat them as per-platform deltas only.
+- Absolute coordinates (Win32): digitizer/absolute-mouse input spans 0..65535 and
+  is scaled to the full virtual desktop — SM_CX/CYVIRTUALSCREEN for size plus
+  SM_X/YVIRTUALSCREEN origin offset (which is negative when a monitor sits
+  left/above the primary). Metrics are cached at start(); per-monitor DPI and
+  runtime monitor add/remove/rearrange are out of scope (restart the producer
+  after changing display topology).
 - Known limitation (Linux): hotplug is supported via udev_monitor — devices
   plugged in after start() are captured automatically (removals handled via
   -ENODEV). Metadata-only events may trigger a redundant rescan (deduped).
