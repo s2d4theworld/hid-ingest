@@ -1,6 +1,6 @@
 # hid-ingest — 8,000 Hz Raw HID Ingestion Engine
 
-![CI](https://github.com/s2d4t/hid-ingest/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/s2d4theworld/hid-ingest/actions/workflows/ci.yml/badge.svg)
 
 Lock-free SPSC raw-input ingestion engine: up to 8,000 Hz pointer/stylus
 packets, zero heap allocations on the hot path, 0% idle CPU, sub-millisecond
