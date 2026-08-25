@@ -79,8 +79,10 @@ private:
     std::atomic<uint64_t> oversize_dropped_{0};   // packets dropped (too large / retry failed)
     std::atomic<uint64_t> hid_unparsed_{0};       // RIM_TYPEHID packets counted + dropped
                                                   // (digitizer parse out of scope)
-    int64_t         screen_w_ = 0;         // cached at run() start (primary screen)
-    int64_t         screen_h_ = 0;
+    int64_t         virtual_x_ = 0;        // virtual-screen origin (may be negative)
+    int64_t         virtual_y_ = 0;
+    int64_t         virtual_w_ = 0;        // cached at run() start (all monitors)
+    int64_t         virtual_h_ = 0;
     // Mirrored HELD-STATE of L/R/M buttons (producer thread only). Raw Input
     // reports DOWN/UP transitions; the sample contract is held state.
     uint16_t        button_mirror_ = 0;

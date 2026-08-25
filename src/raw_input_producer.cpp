@@ -136,10 +136,10 @@ bool RawInputProducer::register_raw_input(HWND hwnd) {
 ///
 /// Coordinate units: dx/dy are fixed-point 24.8 SCREEN-space sub-pixels.
 ///  - Relative moves are integer pixels -> shift into 24.8.
-///  - Absolute digitizer coords span 0..65535 -> scale to the primary screen
-///    size first (int64 math, no overflow), then shift. NOTE: primary-screen
-///    scaling ignores multi-monitor virtual desktops and per-monitor DPI;
-///    see README.
+///  - Absolute digitizer coords span 0..65535 -> scale to the virtual-screen
+///    size (all monitors) and add the virtual origin, in int64 math with the
+///    shift before any division. NOTE: metrics are cached at start(); monitor
+///    changes and per-monitor DPI are not tracked; see README.
 void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
     const bool button_event =
         m.usButtonFlags & (RI_MOUSE_LEFT_BUTTON_DOWN | RI_MOUSE_LEFT_BUTTON_UP |
@@ -172,12 +172,18 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
         // Sub-pixel precision: multiply and SHIFT in int64 FIRST, divide
         // LAST — dividing before the shift quantizes to whole pixels and
         // throws away the sub-pixel bits the 24.8 format exists for.
-        // KNOWN LIMITATION: screen_w_/screen_h_ == 0 (headless / no-monitor
-        // session, GetSystemMetrics returning 0) makes every absolute
-        // sample (0,0). Absolute input is meaningless without a display —
-        // not guarded beyond this note.
-        const int64_t dx = (static_cast<int64_t>(m.lLastX) * screen_w_ << 8) / kAbsMax;
-        const int64_t dy = (static_cast<int64_t>(m.lLastY) * screen_h_ << 8) / kAbsMax;
+        // Multi-monitor: absolute coordinates span the entire virtual
+        // desktop, so scale to the virtual screen bounds and add the origin
+        // offset of the primary monitor (the virtual screen's top-left may
+        // be negative when a monitor sits left/above the primary).
+        // KNOWN LIMITATION: virtual_w_/virtual_h_ == 0 (headless /
+        // no-monitor session, GetSystemMetrics returning 0) makes every
+        // absolute sample the origin offset. Absolute input is meaningless
+        // without a display — not guarded beyond this note.
+        const int64_t dx = (static_cast<int64_t>(m.lLastX) * virtual_w_ << 8) / kAbsMax
+                           + (virtual_x_ << 8);
+        const int64_t dy = (static_cast<int64_t>(m.lLastY) * virtual_h_ << 8) / kAbsMax
+                           + (virtual_y_ << 8);
         sample.dx = clamp24(dx);
         sample.dy = clamp24(dy);
         sample.buttons |= 0x8000;  // absolute-coordinate flag
@@ -201,10 +207,14 @@ void RawInputProducer::emit_mouse_sample(const RAWMOUSE& m) {
 }
 
 void RawInputProducer::run() {
-    // Cache once: absolute-mode scaling uses these per packet. Documented
-    // limitation: primary screen only, no DPI/monitor-change tracking.
-    screen_w_ = GetSystemMetrics(SM_CXSCREEN);
-    screen_h_ = GetSystemMetrics(SM_CYSCREEN);
+    // Cache once: absolute-mode scaling uses these per packet. Virtual-screen
+    // metrics cover ALL monitors (SM_XVIRTUALSCREEN etc.); the origin may be
+    // negative when a monitor sits left/above the primary. Documented
+    // limitation: cached at start, no DPI/monitor-change tracking.
+    virtual_x_ = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    virtual_y_ = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    virtual_w_ = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    virtual_h_ = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
     // Per-instance class name: coexisting producers must not unregister each
     // other's class on teardown.
