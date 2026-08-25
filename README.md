@@ -5,6 +5,10 @@ packets, zero heap allocations on the hot path, 0% idle CPU, sub-millisecond
 latency. (Originally developed against an external engineering spec; this
 document is self-contained.)
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Layout
 
 ```
