@@ -45,12 +45,16 @@ build\console_demo.exe               # move the mouse; Ctrl+C to quit
 - Producer/consumer state on separate 64-byte cache lines (no false sharing).
 - acquire/release ordering: release on publish (`head_`), acquire on observe.
 - Overflow policy: drop-incoming (back-pressure) with a drop counter for telemetry.
-  `DropOnOverflow=false` rejects silently — caller owns drop accounting. A correct
-  latest-wins (drop-oldest) policy requires a Vyukov seq-per-slot ring; see the ring
-  header for why the naive version is racy. That variant now exists:
-  `include/hid_ingest/spsc_ring_vyukov.h` (SpscRingVyukov<Capacity, DropOnOverflow>)
-  — same push/pop API, but on overflow it overwrites the OLDEST sample and
-  keeps the incoming one, so consumers always see the newest window.
+  `DropOnOverflow=false` rejects silently — caller owns drop accounting.
+  ADR — why there is no latest-wins (drop-oldest) variant: an experimental
+  Vyukov seq-per-slot ring (see commit b721c88 in git history) was built and
+  removed. Every encoding of a 3-phase slot lifecycle (writable/full/reading)
+  plus wrap-awareness in a single atomic sequence showed either torn-copy or
+  order-violation races under concurrent overflow+read. For this engine's
+  delta-stream workload, drop-incoming on a 16K-slot ring (~2 s of backlog at
+  8 kHz) is sufficient. If latest-wins semantics are ever genuinely needed,
+  use a single-slot seqlock or atomic triple buffer instead — do not force
+  FIFO ring semantics onto a latest-state problem.
 - Timestamps: Windows samples use QPC, Linux samples use kernel event time. They are
   NOT comparable across platforms and wrap (Windows 32-bit truncation, ~71 min);
   consumers must treat them as per-platform deltas only.

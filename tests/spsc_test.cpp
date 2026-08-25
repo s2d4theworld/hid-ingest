@@ -19,12 +19,10 @@
 #include <thread>
 
 #include "hid_ingest/spsc_ring.h"
-#include "hid_ingest/spsc_ring_vyukov.h"
 #include "hid_ingest/spline.h"
 
 using hid::HidSample;
 using hid::SpscRing;
-using hid::SpscRingVyukov;
 
 static int failures = 0;
 
@@ -192,99 +190,6 @@ static int test_mt_stress() {
     printf("mt_stress: %llu consumed + %llu dropped = %llu, order monotonic\n",
            (unsigned long long)consumed, (unsigned long long)ring.dropped_approx(),
            (unsigned long long)kCount);
-
-    // --- Vyukov variant under the same MT stress: exercises the CAS-vs-
-    // consumer drop-oldest branch (unreachable single-threaded).
-    SpscRingVyukov<16384, true> vring;
-    std::atomic<bool> vdone{false};
-
-    std::thread vproducer([&] {
-        for (uint64_t i = 0; i < kCount; ++i) {
-            HidSample s{};
-            s.dx = static_cast<int32_t>(i & 0xFFFFFFFFull);
-            s.dy = -s.dx;
-            s.timestamp = static_cast<uint32_t>(i);
-            vring.push(s);   // drop-oldest always accepts THIS sample
-        }
-        vdone.store(true, std::memory_order_release);
-    });
-
-    uint32_t vlast = 0;
-    bool vfirst = true;
-    uint64_t vconsumed = 0;
-    while (!(vdone.load(std::memory_order_acquire) && vring.size_approx() == 0)) {
-        const size_t n = vring.pop_batch(batch, 512);
-        for (size_t i = 0; i < n; ++i, ++vconsumed) {
-            if (!vfirst && batch[i].timestamp <= vlast) {  // strict order invariant
-                fprintf(stderr, "FAIL vyukov_mt_stress: %u after %u (consumed=%llu)\n",
-                        batch[i].timestamp, vlast, (unsigned long long)vconsumed);
-                vproducer.join();
-                return 1;
-            }
-            vfirst = false;
-            vlast = batch[i].timestamp;
-        }
-        std::this_thread::yield();
-    }
-    vproducer.join();
-
-    fprintf(stderr, "[vyukov_mt_stress] consumed=%llu dropped=%llu\n",
-            (unsigned long long)vconsumed,
-            (unsigned long long)vring.dropped_approx());
-    CHECK(vconsumed + vring.dropped_approx() == kCount);
-    printf("vyukov_mt_stress: %llu consumed + %llu dropped = %llu, order monotonic\n",
-           (unsigned long long)vconsumed, (unsigned long long)vring.dropped_approx(),
-           (unsigned long long)kCount);
-
-    // --- SLOW-CONSUMER Vyukov stress: deliberately starve the consumer so
-    // the ring overflows and the drop-oldest CAS path runs repeatedly under
-    // concurrency. Without this, dropped==0 proves the drop branch was
-    // never exercised (the test gap that hid the torn-copy race).
-    {
-        constexpr uint64_t kN = 500'000;
-        SpscRingVyukov<1024, true> slow;
-        std::atomic<bool> sdone{false};
-
-        std::thread sprod([&] {
-            for (uint64_t i = 0; i < kN; ++i) {
-                HidSample s{};
-                s.dx = static_cast<int32_t>(i & 0xFFFFFFFFull);
-                s.timestamp = static_cast<uint32_t>(i);
-                while (!slow.push(s)) {}   // latest-wins always accepts
-            }
-            sdone.store(true, std::memory_order_release);
-        });
-
-        uint32_t sprev = 0;
-        bool sfirst = true;
-        uint64_t sconsumed = 0;
-        HidSample sbatch[64];
-        while (!(sdone.load(std::memory_order_acquire) && slow.size_approx() == 0)) {
-            const size_t n = slow.pop_batch(sbatch, 64);
-            for (size_t i = 0; i < n; ++i, ++sconsumed) {
-                if (!sfirst && sbatch[i].timestamp <= sprev) {
-                    fprintf(stderr,
-                            "FAIL vyukov_slow: %u after %u (consumed=%llu)\n",
-                            sbatch[i].timestamp, sprev,
-                            (unsigned long long)sconsumed);
-                    sprod.join();
-                    return 1;
-                }
-                sfirst = false;
-                sprev = sbatch[i].timestamp;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        sprod.join();
-
-        CHECK(slow.dropped_approx() > 0);   // drop branch MUST have run
-        CHECK(sconsumed + slow.dropped_approx() == kN);
-        printf("vyukov_slow_consumer: %llu consumed + %llu dropped = %llu, "
-               "order monotonic\n",
-               (unsigned long long)sconsumed,
-               (unsigned long long)slow.dropped_approx(),
-               (unsigned long long)kN);
-    }
     return 0;
 }
 
@@ -391,62 +296,11 @@ static int test_spline() {
     return 0;
 }
 
-// Vyukov seq-per-slot ring: latest-wins overflow (drop-oldest) must keep
-// the newest Capacity samples, in order, with the drop counter accurate.
-static int test_vyukov_drop_oldest() {
-    SpscRingVyukov<64, true> ring;
-
-    // Overfill well past capacity: only the newest 64 survive.
-    for (uint32_t i = 0; i < 200; ++i)
-        CHECK(ring.push(make(i)));   // drop-oldest always accepts THIS sample
-    CHECK(ring.dropped_approx() == 200 - 64);
-
-    HidSample out[64];
-    const size_t n = ring.pop_batch(out, 64);
-    CHECK(n == 64);
-    for (size_t i = 0; i < n; ++i)
-        CHECK(out[i].timestamp == 200 - 64 + i);   // newest window, ordered
-
-    // No-drop variant still rejects like the basic ring.
-    SpscRingVyukov<64, false> ring2;
-    for (uint32_t i = 0; i < 64; ++i)
-        CHECK(ring2.push(make(i)));
-    CHECK(!ring2.push(make(999)));
-    CHECK(ring2.dropped_approx() == 1);
-    HidSample one;
-    CHECK(ring2.pop(one));
-    CHECK(one.timestamp == 0);   // oldest intact — nothing was overwritten
-
-    // Regression (round 64): fill -> pop some -> push again. After the pops
-    // the ring has free slots; the next overflow push must take the normal
-    // writable path and the pushed sample MUST be readable afterwards
-    // (the old expect_released branch wrote without publishing).
-    SpscRingVyukov<64, true> ring3;
-    for (uint32_t i = 0; i < 64; ++i)
-        CHECK(ring3.push(make(i)));       // full
-    HidSample sink[8];
-    CHECK(ring3.pop_batch(sink, 8) == 8); // free 8 slots (tail_ -> 8)
-    for (uint32_t i = 0; i < 16; ++i)
-        CHECK(ring3.push(make(100 + i))); // 8 fill the holes, 8 drop-oldest
-    HidSample out2[72];
-    const size_t got = ring3.pop_batch(out2, 72);
-    CHECK(got == 64);
-    // Newest window: 100+15 was the last pushed; before it 100..114 then
-    // the surviving originals. Just verify order monotonic + last sample
-    // is the most recent push.
-    for (size_t k = 1; k < got; ++k)
-        CHECK(out2[k].timestamp > out2[k - 1].timestamp);
-    CHECK(out2[got - 1].timestamp == 115);
-    return 0;
-}
-
 int main() {
     failures += test_fixed_point();
     if (!failures) printf("fixed_point: OK\n");
     failures += test_spline();
     if (!failures) printf("spline: OK\n");
-    failures += test_vyukov_drop_oldest();
-    if (!failures) printf("vyukov_drop_oldest: OK\n");
     failures += test_single_thread();
     if (!failures) printf("single_thread: OK\n");
     failures += test_no_drop_policy();
