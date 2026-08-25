@@ -7,6 +7,33 @@ packets, zero heap allocations on the hot path, 0% idle CPU, sub-millisecond
 latency. (Originally developed against an external engineering spec; this
 document is self-contained.)
 
+## Quick start
+
+```cpp
+#include "hid_ingest/spsc_ring.h"
+#include "hid_ingest/raw_input_producer.h"   // Linux: #include "../src/linux_evdev_producer.cpp"
+
+hid::SpscRing<> ring;
+
+hid::RawInputProducer producer(ring);
+producer.start();
+
+// Per frame: drain into a stack buffer — no allocations, no locks.
+hid::HidSample batch[512];
+const size_t n = ring.pop_batch(batch, 512);
+for (size_t i = 0; i < n; ++i) {
+    // batch[i].dx/dy : fixed-point 24.8 sub-pixels (<<8 from integer pixels)
+    // batch[i].buttons: bits 0..2 L/R/M held state; bit 15 = absolute coords
+}
+
+producer.stop();   // joins the background thread; single-owner lifecycle
+```
+
+The same `SpscRing` API serves both platforms — swap the producer type and
+everything downstream is portable. (The Linux producer is currently a
+single-translation-unit `src/linux_evdev_producer.cpp`; see
+`examples/evdev_demo.cpp` for its include pattern.)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
